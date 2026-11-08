@@ -5,7 +5,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = nama versi l
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-08-startup-1"
+Session.Build = "2026-11-08-inventory-2"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -1352,6 +1352,20 @@ end)() end
 ---------------------------------------------------------------------
 local getconsts = (debug and debug.getconstants) or getconstants
 
+-- Sesudah update, require executor dapat menghasilkan tabel kelas yang berbeda
+-- dari metatable instance inventori aktif. Validasi API dan bentuk slot-nya.
+local function isInventory(value)
+    if type(value) ~= "table" or type(rawget(value, "slots")) ~= "table"
+        or type(rawget(value, "capacity")) ~= "number" then return false end
+    if type(value.count) ~= "function" or type(value.remove) ~= "function"
+        or type(value.add) ~= "function" or type(value.used) ~= "function"
+        or type(value.select) ~= "function" or type(value.room) ~= "function" then return false end
+    for _, slot in pairs(rawget(value, "slots")) do
+        if type(slot) ~= "table" or type(slot.id) ~= "number" or type(slot.n) ~= "number" then return false end
+    end
+    return true
+end
+
 -- Fungsi place game: satu-satunya yang memakai "placedAt" + "flips" sekaligus.
 -- Kirimnya "tile" (game baru, ByteNet) atau "SetTile" (game lama).
 local function isSetTileFn(fn)
@@ -1467,8 +1481,7 @@ local function findRefs()
             end
             if not Refs.Inv then
                 local ok, isInv = pcall(function()
-                    return getmetatable(v) == InventoryModule and type(rawget(v, "slots")) == "table"
-                        and rawget(v, "capacity") ~= nil
+                    return isInventory(v)
                 end)
                 if ok and isInv then Refs.Inv = v end
             end
@@ -1979,7 +1992,7 @@ function Anim.quickRefs()
                 if tu == "table" then
                     if not Refs.Inv then
                         local ok, isInv = pcall(function()
-                            return getmetatable(u) == InventoryModule and type(rawget(u, "slots")) == "table"
+                            return isInventory(u)
                         end)
                         if ok and isInv then Refs.Inv = u end
                     end
