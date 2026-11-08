@@ -5,7 +5,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = nama versi l
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-08-inventory-2"
+Session.Build = "2026-11-08-references-3"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -374,6 +374,7 @@ local Refs = {
     Trees = nil,      -- data pohon (waktu tanam)
     Others = nil,     -- daftar pemain lain di world (untuk Penjaga)
 }
+Session.References = Refs
 
 -- Daftar drop di world (diambil dari game)
 local Drops = { list = nil, update = nil, brokeAt = {} }
@@ -1451,24 +1452,37 @@ local function isGameFn(fn)
         if ok and res then return false end
     end
     local ok, src = pcall(debug.info, fn, "s")
-    if ok and type(src) == "string" and src ~= "" and not string.find(src, "GameGui", 1, true) then
-        return false
+    if ok and type(src) == "string" and src ~= "" then
+        return string.find(src, "GameGui", 1, true) ~= nil
+            or string.find(src, "PlayerScripts", 1, true) ~= nil
+            or string.find(src, "ReplicatedStorage", 1, true) ~= nil
     end
     return true
 end
 
 local function findRefs()
-    Refs.World, Refs.Inv, Refs.SetTile, Refs.State, Refs.Punch, Refs.Menu = nil, nil, nil, nil, nil, nil
+    -- World/Inv sudah dipindai ulang dari koneksi aktif oleh reconnect.
+    Refs.SetTile, Refs.State, Refs.Punch, Refs.Menu = nil, nil, nil, nil
     Refs.Gems = nil
     Refs.Hud = nil
     Refs.Others = nil
     Refs.Arm = nil
     Refs.Particles = {}
     Anim.Particles = nil
-    if not getgc then
-        return false, "Executor tidak punya getgc()"
+    Refs.ScanCount, Refs.ScanError = 0, nil
+    if type(getgc) ~= "function" then
+        Refs.ScanError = "Executor tidak punya getgc()"
+        return Refs.World ~= nil, Refs.ScanError
     end
-    for _, v in ipairs(getgc(true)) do
+    local gcOk, objects = pcall(getgc, true)
+    if not gcOk or type(objects) ~= "table" then
+        Refs.ScanError = "getgc gagal: " .. tostring(objects)
+        return Refs.World ~= nil, Refs.ScanError
+    end
+    -- Hasil getgc executor dapat berlubang atau memakai key non-urutan.
+    -- ipairs berhenti di lubang pertama dan melewatkan objek yang masih valid.
+    for _, v in pairs(objects) do
+        Refs.ScanCount += 1
         local tv = type(v)
         if tv == "table" then
             if not Refs.World then
@@ -1529,6 +1543,7 @@ local function findRefs()
         end
         if Refs.World and Refs.Inv and Refs.SetTile and Refs.State and Refs.Punch
             and Refs.Menu and Refs.Gems and Refs.Hud and Refs.Others then break end
+        if Refs.ScanCount % 2000 == 0 then task.wait() end
     end
     return Refs.World ~= nil
 end
@@ -1968,14 +1983,19 @@ end
 function Anim.quickRefs()
     if not getconnections then return false end
     local queue, seen, n = {}, {}, 0
-    for _, name in ipairs({ "RenderStepped", "Heartbeat", "Stepped" }) do
-        local okS, sig = pcall(function() return RunService[name] end)
-        if okS and sig then
-            local ok, conns = pcall(getconnections, sig)
-            if ok and type(conns) == "table" then
-                for _, c in ipairs(conns) do
-                    local okf, fn = pcall(function() return c.Function end)
-                    if okf and type(fn) == "function" then queue[#queue + 1] = fn end
+    for _, entry in ipairs({
+        { RunService, { "RenderStepped", "Heartbeat", "Stepped" } },
+        { UserInputService, { "InputBegan", "InputEnded", "TouchTap" } },
+    }) do
+        for _, name in ipairs(entry[2]) do
+            local okS, sig = pcall(function() return entry[1][name] end)
+            if okS and sig then
+                local ok, conns = pcall(getconnections, sig)
+                if ok and type(conns) == "table" then
+                    for _, c in pairs(conns) do
+                        local okf, fn = pcall(function() return c.Function end)
+                        if okf and type(fn) == "function" then queue[#queue + 1] = fn end
+                    end
                 end
             end
         end
@@ -2088,7 +2108,7 @@ local function findDropRefs(deep)
     end
     -- 3) cadangan: cari lewat getgc (hanya kalau diminta: berat)
     if not Drops.list and deep and getgc then
-        for _, v in ipairs(getgc(true)) do
+        for _, v in pairs(getgc(true)) do
             if type(v) == "table" then
                 local e = rawget(v, 1)
                 if type(e) == "table" and rawget(e, "uid") ~= nil and rawget(e, "frame") ~= nil
@@ -11406,6 +11426,8 @@ local function reconnect(show)
     if Clear.Running then stopClear("Dihentikan: hubungkan ulang ke game") end
     if Farmer.Running then stopFarmer("Dihentikan: hubungkan ulang ke game") end
     Auto.resetReach()
+    -- Jangan pakai objek world sebelumnya setelah pindah world.
+    Refs.World, Refs.Inv = nil, nil
     -- 1) cari isi tas cepat lalu langsung isi dropdown (tidak menunggu scan getgc yang lama)
     if pcall(Anim.quickRefs) and Refs.Inv then
         pcall(doInvRefresh, true)
@@ -11413,6 +11435,7 @@ local function reconnect(show)
     end
     -- 2) scan lengkap
     findRefs()
+    if Refs.ScanError then warn("[n4th] " .. Refs.ScanError) end
     watchInventory()
     pcall(doInvRefresh, true) -- langsung di thread ini (thread INIT / antrian UI), bukan thread tombol
     findDropRefs(true)
@@ -11424,6 +11447,7 @@ local function reconnect(show)
     if Misc.InfJump then hookJammer() end
     pcall(function() UI.RefInfo:SetDesc(refsText()) end)
     updateStatus()
+    print("[n4th] " .. Session.Build .. " | scanned=" .. tostring(Refs.ScanCount) .. " | " .. refsText())
     if show then notify(show, refsText(), 5) end
 end
 

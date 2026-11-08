@@ -37,8 +37,31 @@ local function describeFunction(fn)
     end
     return result
 end
-emit("n4th diagnosis v2 | Place=" .. tostring(game.PlaceId) .. " | Version=" .. tostring(game.PlaceVersion))
+emit("n4th diagnosis v3 | Place=" .. tostring(game.PlaceId) .. " | Version=" .. tostring(game.PlaceVersion))
 emit("API getgc=" .. type(getgc) .. " | constants=" .. type(constants) .. " | getconnections=" .. type(getconnections))
+local globals = (getgenv and getgenv()) or _G
+local session = globals.__n4thOpus
+emit("Session build=" .. tostring(session and session.Build) .. " | ready=" .. tostring(session and session.Ready))
+local player = game:GetService("Players").LocalPlayer
+local playerGui = player and player:FindFirstChild("PlayerGui")
+local gameGui = playerGui and playerGui:FindFirstChild("GameGui")
+emit("GameGui=" .. tostring(gameGui ~= nil) .. " | World GUI=" .. tostring(gameGui and gameGui:FindFirstChild("World") ~= nil))
+if session and type(session.References) == "table" then
+    local refs = session.References
+    emit("Session World=" .. type(refs.World) .. " | Inventory=" .. type(refs.Inv) .. " | Hit=" .. type(refs.Punch)
+        .. " | setTile=" .. type(refs.SetTile) .. " | GC visited=" .. tostring(refs.ScanCount))
+    if refs.ScanError then emit("Session scan error=" .. tostring(refs.ScanError)) end
+    if type(refs.World) == "table" then
+        emit("Session World keys: " .. keysOf(refs.World, 350))
+        for key, fn in pairs(refs.World) do
+            if type(key) == "string" and type(fn) == "function" then
+                local lower = key:lower()
+                if lower:find("tile", 1, true) or lower:find("punch", 1, true) or lower:find("hit", 1, true)
+                    or lower:find("backpack", 1, true) then emit("Session World." .. key .. ": " .. describeFunction(fn)) end
+            end
+        end
+    end
+end
 
 local shared = game:GetService("ReplicatedStorage"):FindFirstChild("Shared")
 if shared then
@@ -63,7 +86,15 @@ else
         emit("STOP: getgc gagal: " .. tostring(objects))
     else
         local worlds, bags, candidates, examined, readable, constantCount = 0, 0, {}, 0, 0, 0
-        for index, value in ipairs(objects) do
+        local visited, types, sources, prefix = 0, {}, {}, 0
+        for _ in ipairs(objects) do
+            prefix += 1
+            if prefix >= 10000 then break end
+        end
+        emit("GC length (#)=" .. #objects .. " | ipairs prefix=" .. prefix .. (prefix == 10000 and "+" or ""))
+        for _, value in pairs(objects) do
+            visited += 1
+            types[type(value)] = (types[type(value)] or 0) + 1
             if type(value) == "table" then
                 local slots = rawget(value, "slots")
                 local capacity = rawget(value, "capacity")
@@ -103,6 +134,7 @@ else
                 end
             elseif type(value) == "function" and type(constants) == "function" then
                 local source = tostring(info(value, "s"))
+                sources[source] = (sources[source] or 0) + 1
                 local functionName = tostring(info(value, "n")):lower()
                 if source:find("GameGui", 1, true) or source:find("PlayerScripts", 1, true)
                     or source:find("ReplicatedStorage", 1, true) or functionName == "punch"
@@ -132,10 +164,17 @@ else
                     end
                 end
             end
-            if index % 1000 == 0 then task.wait() end
+            if visited % 2000 == 0 then task.wait() end
         end
         table.sort(candidates, function(a, b) return a.score > b.score end)
-        emit("Scanned=" .. #objects .. " | game functions=" .. examined .. " | constants readable=" .. readable .. " | constant values=" .. constantCount)
+        emit("Actually visited=" .. visited .. " | tables=" .. tostring(types.table or 0) .. " | functions=" .. tostring(types["function"] or 0))
+        emit("Game functions=" .. examined .. " | constants readable=" .. readable .. " | constant values=" .. constantCount)
+        local sourceList = {}
+        for source, count in pairs(sources) do sourceList[#sourceList + 1] = {source=source, count=count} end
+        table.sort(sourceList, function(a, b) return a.count > b.count end)
+        for index = 1, math.min(#sourceList, 8) do
+            emit("Source group: " .. sourceList[index].source .. " | count=" .. sourceList[index].count)
+        end
         for index = 1, math.min(#candidates, 12) do
             local candidate = candidates[index]
             emit("Action candidate #" .. index .. " name=" .. tostring(info(candidate.fn, "n"))
