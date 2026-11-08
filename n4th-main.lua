@@ -5,10 +5,19 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = nama versi l
     G[key] = nil
 end
 local Session = {}
+Session.Build = "2026-11-08-startup-1"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
 end
+Session.InitStep = "layanan game"
+print("[n4th] Memuat build " .. Session.Build)
+task.delay(45, function()
+    if alive() and not Session.Ready then
+        warn("[n4th] Masih memuat: " .. tostring(Session.InitStep)
+            .. ". Kirim baris ini jika menu belum muncul.")
+    end
+end)
 
 do
     local getId = getthreadidentity or get_thread_identity or getidentity or (syn and syn.get_thread_identity)
@@ -30,23 +39,78 @@ local RunService = game:GetService("RunService")
 local VirtualUser = game:GetService("VirtualUser")
 local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
-local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+local PlayerGui
+local Shared, WorldRemotes, SetTileRemote
+local ItemDB, InventoryModule, NetOk, Net
+local GameGui, ParticlesOk, ParticlesModule, MenuModOk, MenuModule
+local RolesOk, RolesModule, SfxOk, SfxModule
+do
+    local deadline = os.clock() + 15
+    while not LocalPlayer and os.clock() < deadline do
+        task.wait(0.1)
+        LocalPlayer = Players.LocalPlayer
+    end
+    assert(LocalPlayer, "[n4th] LocalPlayer belum tersedia. Masuk ke game lalu execute ulang.")
 
-local Shared = ReplicatedStorage:WaitForChild("Shared")
-local WorldRemotes = ReplicatedStorage:WaitForChild("WorldRemotes")
--- Remote lama (versi game sebelum ByteNet). Hanya dipakai kalau fungsi baru tidak ada.
-local SetTileRemote = WorldRemotes:FindFirstChild("SetTile")
+    local function requiredChild(parent, name)
+        Session.InitStep = parent:GetFullName() .. "/" .. name
+        local child = parent:FindFirstChild(name) or parent:WaitForChild(name, 15)
+        assert(child, "[n4th] Tidak menemukan " .. Session.InitStep
+            .. " setelah 15 detik. Struktur game mungkin berubah setelah update.")
+        return child
+    end
 
-local ItemDB = require(Shared.ItemDB)
-local InventoryModule = require(Shared.Inventory)
-local NetOk, Net = pcall(require, Shared.Net)
+    local function findModule(parent, name)
+        if not parent then return nil end
+        local direct = parent:FindFirstChild(name)
+        if direct and direct:IsA("ModuleScript") then return direct end
+        local found
+        for _, child in ipairs(parent:GetDescendants()) do
+            if child.Name == name and child:IsA("ModuleScript") then
+                if found then return nil, "lebih dari satu modul bernama " .. name end
+                found = child
+            end
+        end
+        return found
+    end
 
-local GameGui = PlayerGui:WaitForChild("GameGui")
-local ParticlesOk, ParticlesModule = pcall(require, GameGui:WaitForChild("Particles"))
-local MenuModOk, MenuModule = pcall(require, GameGui:WaitForChild("WorldMenu"))
-local RolesOk, RolesModule = pcall(require, Shared:FindFirstChild("Roles"))
-local SfxOk, SfxModule = pcall(require, Shared:FindFirstChild("Sfx"))
+    local function loadModule(parent, name, required)
+        Session.InitStep = (parent and parent:GetFullName() or "GUI game") .. "/" .. name
+        local module, reason = findModule(parent, name)
+        if not module and required and not reason then
+            -- Modul yang belum direplikasi diberi waktu terbatas untuk muncul.
+            parent:WaitForChild(name, 15)
+            module, reason = findModule(parent, name)
+        end
+        if module then
+            local ok, result = pcall(require, module)
+            if ok and type(result) == "table" then return true, result end
+            reason = ok and "hasil require bukan tabel" or tostring(result)
+        end
+        local message = "[n4th] Modul " .. Session.InitStep .. ": " .. (reason or "tidak ditemukan")
+        if required then error(message, 0) end
+        warn(message .. " (opsional, lanjut memuat menu)")
+        return false, nil
+    end
 
+    PlayerGui = requiredChild(LocalPlayer, "PlayerGui")
+    Shared = requiredChild(ReplicatedStorage, "Shared")
+    -- Remote versi lama bersifat opsional pada game yang memakai ByteNet.
+    WorldRemotes = ReplicatedStorage:FindFirstChild("WorldRemotes")
+    SetTileRemote = WorldRemotes and WorldRemotes:FindFirstChild("SetTile")
+    local _, itemDB = loadModule(Shared, "ItemDB", true)
+    ItemDB = itemDB
+    local _, inventory = loadModule(Shared, "Inventory", true)
+    InventoryModule = inventory
+    NetOk, Net = loadModule(Shared, "Net", false)
+    GameGui = PlayerGui:FindFirstChild("GameGui")
+    ParticlesOk, ParticlesModule = loadModule(GameGui, "Particles", false)
+    MenuModOk, MenuModule = loadModule(GameGui, "WorldMenu", false)
+    RolesOk, RolesModule = loadModule(Shared, "Roles", false)
+    SfxOk, SfxModule = loadModule(Shared, "Sfx", false)
+end
+
+Session.InitStep = "WindUI"
 local WindUI
 do
     -- File tag ini identik dengan release 1.6.66, tanpa redirect unduhan GitHub.
@@ -81,6 +145,7 @@ do
     -- Inisialisasi hanya sekali, setelah respons berhasil dikompilasi.
     WindUI = downloadWindUI()()
 end
+Session.InitStep = "config dan referensi game"
 
 ---------------------------------------------------------------------
 -- PENGATURAN & DATA
@@ -1855,7 +1920,7 @@ end
 ---------------------------------------------------------------------
 -- Cara game: World.takeDrop(uid, jumlah) -> server balas jumlahnya -> masuk inventori.
 -- Game cuma ambil drop yang disentuh badan; di sini drop diambil langsung.
-local TakeDropRemote = WorldRemotes:FindFirstChild("TakeDrop") -- game lama saja
+local TakeDropRemote = WorldRemotes and WorldRemotes:FindFirstChild("TakeDrop") -- game lama saja
 
 local getUpvalues -- (didefinisikan di bawah)
 
@@ -1989,7 +2054,7 @@ local function findDropRefs(deep)
         end
     end
     -- 2) dari handler DropTaken game
-    local ev = WorldRemotes:FindFirstChild("DropTaken")
+    local ev = WorldRemotes and WorldRemotes:FindFirstChild("DropTaken")
     if not Drops.list and ev and getconnections then
         local ok, conns = pcall(getconnections, ev.OnClientEvent)
         if ok and type(conns) == "table" then
@@ -4351,7 +4416,7 @@ local function findTreeRefs()
     if okS and foundS == true then return true end
     Refs.Trees, Refs.TreeMode, Refs.TreeP = nil, nil, nil
     -- 2) game lama: handler remote WorldRemotes.TreeChanged
-    local ev = WorldRemotes:FindFirstChild("TreeChanged")
+    local ev = WorldRemotes and WorldRemotes:FindFirstChild("TreeChanged")
     if ev and ev:IsA("RemoteEvent") and getconnections then
         local ok, conns = pcall(getconnections, ev.OnClientEvent)
         if ok and type(conns) == "table" then
@@ -4547,7 +4612,7 @@ function Auto.findTreesDeep()
     end
     -- 2) handler remote world
     if getconnections then
-        for _, ev in ipairs(WorldRemotes:GetChildren()) do
+        for _, ev in ipairs(WorldRemotes and WorldRemotes:GetChildren() or {}) do
             if ev:IsA("RemoteEvent") then
                 local ok, conns = pcall(getconnections, ev.OnClientEvent)
                 if ok and type(conns) == "table" then
@@ -8182,6 +8247,7 @@ do (function()
     if chosen then Config.save(true) end
 end)() end
 
+Session.InitStep = "membuat menu WindUI"
 local Window = I18N.wrap(WindUI:CreateWindow({
     Title = "n4th",
     Icon = "sprout",
@@ -11048,7 +11114,7 @@ do (function()
         end)
     end
     if not closedHooked then
-        local closed = WorldRemotes:FindFirstChild("WorldClosed")
+        local closed = WorldRemotes and WorldRemotes:FindFirstChild("WorldClosed")
         if closed and closed:IsA("RemoteEvent") then
             table.insert(Connections, closed.OnClientEvent:Connect(function(msg)
                 if alive() then onWorldClosed(msg) end
@@ -11688,3 +11754,7 @@ Session.Cleanup = function()
     pcall(function() FlyPad:Destroy() end)
     pcall(function() Window:Destroy() end)
 end
+
+Session.InitStep = "siap"
+Session.Ready = true
+print("[n4th] Menu siap (build " .. Session.Build .. ")")
