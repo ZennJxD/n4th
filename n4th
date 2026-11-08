@@ -1,0 +1,26 @@
+-- Loader tetap: script utama selalu diambil ulang dengan URL unik.
+local scriptUrl = "https://raw.githubusercontent.com/ZennJxD/n4th/refs/heads/main/n4th-main.lua"
+local httpService = game:GetService("HttpService")
+local lastError = "respons kosong"
+
+for attempt = 1, 3 do
+    local requestUrl = scriptUrl .. "?update=" .. httpService:GenerateGUID(false)
+    local ok, source = pcall(function() return game:HttpGet(requestUrl) end)
+    if not ok then
+        lastError = tostring(source)
+    elseif type(source) ~= "string" or source:match("^%s*$") then
+        lastError = "server mengirim respons kosong"
+    elseif source:match("^%s*<") then
+        lastError = "server mengirim halaman HTML, coba lagi nanti"
+    else
+        local fn, compileError = loadstring(source, "n4th-main")
+        if not fn then
+            error("[n4th] Script terbaru gagal dikompilasi: " .. tostring(compileError), 0)
+        end
+        -- Jalankan sekali; error script tidak memicu eksekusi ulang.
+        return fn()
+    end
+    if attempt < 3 then task.wait(1) end
+end
+
+error("[n4th] Gagal mengambil update setelah 3 percobaan: " .. lastError, 0)
