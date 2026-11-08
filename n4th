@@ -1,28 +1,37 @@
--- Loader tetap: script utama selalu diambil ulang dengan URL unik.
+-- Loader tetap: cek commit terbaru, lalu ambil script dari URL commit tersebut.
 assert(type(loadstring) == "function", "[n4th] Executor tidak menyediakan loadstring setelah update.")
-local scriptUrl = "https://raw.githubusercontent.com/ZennJxD/n4th/refs/heads/main/n4th-main.lua"
+local repository = "ZennJxD/n4th"
 local httpService = game:GetService("HttpService")
 local lastError = "respons kosong"
 
+local function download(url)
+    local source = game:HttpGet(url)
+    if type(source) ~= "string" or source:match("^%s*$") then error("server mengirim respons kosong", 0) end
+    if source:match("^%s*<") then error("server mengirim HTML, bukan script/metadata", 0) end
+    if source:match("^%s*404:") then error("file GitHub tidak ditemukan (404)", 0) end
+    return source
+end
+
+local function latestSource()
+    local refUrl = "https://api.github.com/repos/" .. repository .. "/git/ref/heads/main?update=" .. httpService:GenerateGUID(false)
+    local ref = httpService:JSONDecode(download(refUrl))
+    local commit = type(ref) == "table" and type(ref.object) == "table" and ref.object.sha
+    if type(commit) ~= "string" or #commit ~= 40 or not commit:match("^%x+$") then
+        local reason = type(ref) == "table" and ref.message or "respons metadata tidak valid"
+        error("Gagal mengecek update GitHub: " .. tostring(reason), 0)
+    end
+    return download("https://raw.githubusercontent.com/" .. repository .. "/" .. commit .. "/n4th-main.lua"), commit
+end
+
 for attempt = 1, 3 do
-    local requestUrl = scriptUrl .. "?update=" .. httpService:GenerateGUID(false)
-    local ok, source = pcall(function() return game:HttpGet(requestUrl) end)
-    if not ok then
-        lastError = tostring(source)
-    elseif type(source) ~= "string" or source:match("^%s*$") then
-        lastError = "server mengirim respons kosong"
-    elseif source:match("^%s*<") then
-        lastError = "server mengirim halaman HTML, coba lagi nanti"
-    else
+    local ok, source, commit = pcall(latestSource)
+    if ok then
         local fn, compileError = loadstring(source, "n4th-main")
-        if not fn then
-            error("[n4th] Script terbaru gagal dikompilasi: " .. tostring(compileError), 0)
-        end
-        -- Jalankan sekali; error script tidak memicu eksekusi ulang.
+        if not fn then error("[n4th] Script terbaru gagal dikompilasi: " .. tostring(compileError), 0) end
+        print("[n4th] Menjalankan commit " .. commit:sub(1, 8))
+        -- Error runtime tidak memicu eksekusi ulang atau aksi game ganda.
         local ran, result = xpcall(fn, function(err)
-            if debug and type(debug.traceback) == "function" then
-                return debug.traceback(tostring(err), 2)
-            end
+            if debug and type(debug.traceback) == "function" then return debug.traceback(tostring(err), 2) end
             return tostring(err)
         end)
         if not ran then
@@ -33,7 +42,7 @@ for attempt = 1, 3 do
         end
         return result
     end
+    lastError = tostring(source)
     if attempt < 3 then task.wait(1) end
 end
-
 error("[n4th] Gagal mengambil update setelah 3 percobaan: " .. lastError, 0)
