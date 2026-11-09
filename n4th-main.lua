@@ -5,7 +5,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = nama versi l
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-09-finder-teleport-1"
+Session.Build = "2026-11-09-finder-teleport-2"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -9556,16 +9556,23 @@ do (function() -- fungsi sendiri: variabel di dalam tidak ikut batas 200 local
         local oldFg = rawget(w, "fg")
         local m = Refs.Menu
         if m and type(rawget(m, "enter")) == "function" then
-            pcall(m.enter, name)
+            local ok, res, msg, hopping = pcall(m.enter, name)
+            if not ok then return false, strip(res) end
+            if hopping == true then return false, strip(msg), true end
+            if res == false then return false, strip(msg) end
         elseif type(rawget(w, "enter")) == "function" then
-            local ok, res, msg = pcall(w.enter, name)
-            if ok and not res then return false, strip(msg) end
+            local ok, res, msg, hopping = pcall(w.enter, name)
+            if not ok then return false, strip(res) end
+            -- Game v1225: false, pesan, true berarti server sedang memindahkan pemain.
+            if hopping == true then return false, strip(msg), true end
+            if not res then return false, strip(msg) end
         else
             return false, "fungsi masuk world tidak ketemu"
         end
         -- berhasil kalau data world sudah diganti yang baru
         local t0 = os.clock()
         while alive() and os.clock() - t0 < 8 do
+            if WorldFinder.Busy and WorldFinder.Teleporting then return false, "Pindah server", true end
             if rawget(w, "fg") ~= oldFg then return true end
             task.wait(0.25)
         end
@@ -12209,7 +12216,11 @@ end
         end
         if not live() then return false, "Dihentikan" end
         WorldFinder.log("Masuk ke " .. name .. " untuk memeriksa lock")
-        local ok, reason = Guard.enterWorld(name)
+        local ok, reason, hopping = Guard.enterWorld(name)
+        if hopping == true then
+            WorldFinder.Teleporting = true
+            WorldFinder.log("Game meminta pindah server ke " .. name .. ". Menunggu teleport.")
+        end
         if not waitTeleport() then return false, "Dihentikan" end
         if not live() then return false, "Dihentikan" end
         if not ok then return false, tostring(reason or "World tidak bisa dimasuki") end
