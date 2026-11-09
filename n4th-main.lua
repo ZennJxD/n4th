@@ -5,7 +5,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = nama versi l
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-09-break-delay-1"
+Session.Build = "2026-11-09-auto-drop-1"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -304,6 +304,19 @@ local Pabrik = {
     Row = {},            -- baris tanam yang sedang dikerjakan
 }
 
+local AutoDrop = {
+    On = false,
+    Items = {},
+    World = "",
+    X = -1, Y = -1,
+    Facing = 1,
+    Busy = false,
+    Cancelled = false,
+    Dropped = 0,
+    Status = "Mati",
+    Zones = {},
+}
+
 local Guard = {
     On = false,
     Who = "Staff (Mod/Dev)",   -- "Staff (Mod/Dev)" | "Semua pemain"
@@ -519,6 +532,20 @@ I18N.EN = {
     ["Tembus block, pakai tombol ▲/▼ (bisa kena rollback)"] = "Pass through blocks, use the ▲/▼ buttons (may get rolled back)",
     ["Bahasa / Language"] = "Language / Bahasa",
     ["Titik Drop"] = "Drop Point", ["Atur titik drop"] = "Set drop point", ["Drop otomatis"] = "Auto drop",
+    ["Pantau item penuh"] = "Monitor full stacks",
+    ["Item mencapai 200 lalu dibawa ke tile drop. Setelah itu kembali dan lanjut farming."] =
+        "At 200, selected items are taken to the drop tile. Then return and resume farming.",
+    ["Item yang di-drop"] = "Items to drop",
+    ["Pilih item inventori. Setiap item yang mencapai 200 di-drop sebanyak 200."] =
+        "Select inventory items. Each selected item drops a full stack of 200 when full.",
+    ["Pilih tile drop"] = "Select drop tile",
+    ["Pilih satu tile di grid 5x5. Tile disimpan sebagai posisi berdiri di world ini."] =
+        "Choose one tile on the 5x5 grid. It is saved as the standing position in this world.",
+    ["Pilih posisi berdiri untuk drop"] = "Choose drop standing tile",
+    ["Item jatuh di depan karakter sesuai arah drop."] = "Items land in front of the character in the selected direction.",
+    ["Arah drop"] = "Drop direction", ["Kiri"] = "Left", ["Kanan"] = "Right",
+    ["Pakai tile tempat berdiri sekarang"] = "Use current standing tile",
+    ["Selesai"] = "Done",
     ["Seed sudah banyak: jeda, drop ke titik drop (tab Titik Drop), balik ke posisi farm"] =
         "Too many seeds: pause, drop at the drop point (Drop Point tab), return to farm position",
     ["Seed dari block yang dipilih"] = "Seeds of the selected block",
@@ -1264,6 +1291,7 @@ Config.add("Chat", Spam, { "Texts", "IntervalSec" })
 Config.add("Lahan", Land, { "X0", "X1", "Y0" })
 Config.add("Bangun", Build, { "BlockId", "ThenPabrik", "BreakX", "BreakY", "Tiles" })
 Config.add("Vending", Vend, { "Mode", "Point", "Items", "DropX", "DropY" })
+Config.add("AutoDrop", AutoDrop, { "Items", "World", "X", "Y", "Facing" })
 Config.add("Pabrik", Pabrik, {
     "SeedId", "WholeWorld", "Tiles", "BreakX", "BreakY",
     "Drop", "Keep", "DropAt", "DropWorld", "DropX", "DropY",
@@ -1710,6 +1738,7 @@ local function doInvRefresh(force)
     -- daftar Splice & Tas (dibuat di bagian bawah script)
     if UI.SpliceRefresh then pcall(UI.SpliceRefresh, force) end
     if UI.TrashRefresh then pcall(UI.TrashRefresh, force) end
+    if UI.AutoDropRefresh then pcall(UI.AutoDropRefresh, force) end
 end
 
 local function refreshInvDropdown(force)
@@ -2252,6 +2281,10 @@ local nextDropScan = 0
 local function canTry(d, now)
     if type(d) ~= "table" or d.taking or (d.n or 0) <= 0 or type(d.x) ~= "number" then return false end
     if d.armed == false and d.id ~= 112 then return false end
+    for _, zone in ipairs(AutoDrop.Zones) do
+        if zone.world == (Refs.World and rawget(Refs.World, "name")) and zone.id == d.id
+            and math.abs(d.x - zone.x) <= 2.5 and math.abs(d.y - zone.y) <= 2.5 then return false end
+    end
     local fail = DropFailUntil[d.uid]
     return not (fail and now < fail)
 end
@@ -2296,6 +2329,7 @@ function Drops.remoteTick(list, s)
 end
 
 local function collectTick()
+    if AutoDrop.Busy then return end
     local busy = State.AutoCollect or State.Override ~= nil or (Clear.Running and Clear.Collect)
         or (Farmer.Running and Farmer.Collect) or Pabrik.Running or Build.Running or Splice.Roaming or Vend.Running
     if not busy then return end
@@ -2755,6 +2789,7 @@ local stopClear, stopFarmer
 
 local function startFarm()
     if State.Running then return end
+    if AutoDrop.Busy then notify("Auto Drop", "Tunggu perjalanan drop selesai", 3) return end
     local err = validate()
     if err then
         stopFarm(err)
@@ -2796,12 +2831,15 @@ local BreakTimes = {}        -- tile yang terus balik lagi setelah pecah
 local Reach = nil            -- daftar tile yang bisa dijangkau (cache)
 
 local function autoOn()
+    if Move.Homing and Move.HomingLive and not Move.HomingLive() then return false end
     return (Clear.Running or Farmer.Running or Splice.Roaming or Pabrik.Running or Build.Running or Move.Homing
         or Vend.Running) and alive()
 end
 
 local function setMoveStatus(text)
-    if Clear.Running then
+    if AutoDrop.Busy then
+        AutoDrop.Status = text
+    elseif Clear.Running then
         Clear.Status = text
     elseif Farmer.Running then
         Farmer.Status = text
@@ -3695,7 +3733,7 @@ function Drops.touchAll(tiles, hx, hy)
     local function dropsAt(t)
         for _, d in ipairs(list) do
             if type(d) == "table" and type(d.x) == "number" and (d.n or 0) > 0 and d.armed ~= false
-                and not d.taking and inTile(t, d.x, d.y) then
+                and not d.taking and canTry(d, os.clock()) and inTile(t, d.x, d.y) then
                 return true
             end
         end
@@ -4404,6 +4442,7 @@ end
 
 local function startClear()
     if Clear.Running then return end
+    if AutoDrop.Busy then notify("Auto Drop", "Tunggu perjalanan drop selesai", 3) return end
     local err = checkAutoStart()
     if err then
         notify("Auto Clear", err, 4)
@@ -5036,7 +5075,7 @@ function Farmer.dropList()
     for sid in pairs(Farmer.Got) do
         for _, id in ipairs({ sid, sid - 1 }) do
             local it = ItemDB[id]
-            if it and (id == sid or it.kind ~= "seed") then
+            if it and (id == sid or it.kind ~= "seed") and not (AutoDrop.On and table.find(AutoDrop.Items, id)) then
                 local n = invCount(id)
                 local keep = (id == Farmer.SeedId) and Farmer.Keep or 0
                 if n >= Farmer.DropAt and n > keep then
@@ -5117,6 +5156,7 @@ end
 
 local function startFarmer()
     if Farmer.Running then return end
+    if AutoDrop.Busy then notify("Auto Drop", "Tunggu perjalanan drop selesai", 3) return end
     local err = checkAutoStart()
     if not err and not Farmer.Harvest and not Farmer.Plant then
         err = "Aktifkan Auto Harvest atau Auto Plant"
@@ -5368,15 +5408,16 @@ end
 
 -- Jalan ke 1 tile tertentu (dipakai Penjaga: balik ke posisi Auto Farm).
 -- Pakai A* yang sama, tanpa taruh block.
-local function walkTo(tx, ty, maxSec)
+local function walkTo(tx, ty, maxSec, live)
     local w = Refs.World
     if not w or not OrigIsDown then return false end
     if tx < 0 or ty < 0 or tx >= w.w or ty >= w.h then return false end
     Move.Homing = true
+    Move.HomingLive = live
     autoBegin()
     local goal = { [ty * w.w + tx] = true }
     local t0, ok = os.clock(), false
-    while alive() and Move.Homing and os.clock() - t0 < (maxSec or 30) do
+    while alive() and Move.Homing and (not live or live()) and os.clock() - t0 < (maxSec or 30) do
         local s = playerState()
         if not s or s.dead then
             task.wait(0.3) -- tunggu respawn / world selesai dimuat
@@ -5394,6 +5435,7 @@ local function walkTo(tx, ty, maxSec)
         end
     end
     Move.Homing = false
+    Move.HomingLive = nil
     autoEnd()
     return ok
 end
@@ -5700,19 +5742,22 @@ local function goWorld(name, door)
 end
 
 -- Drop pakai fungsi drop game (item jatuh di depan karakter)
-local function dropItems(id, n, live)
+local function dropItems(id, n, live, allowFlip)
     local hud = Refs.Hud
     local f = hud and rawget(hud, "onDrop")
     if type(f) ~= "function" then return 0, "fungsi drop game tidak ketemu" end
     local left, flipped = n, false
     while left > 0 and live() do
         local before = invCount(id)
-        pcall(f, id, math.min(left, 200))
+        local amount = math.min(left, 200, before)
+        if amount <= 0 then return n - left, "item sudah habis" end
+        local ok, err = pcall(f, id, amount)
+        if not ok then return n - left, tostring(err) end
         task.wait(0.7) -- game menolak drop yang terlalu cepat (0.3 dtk)
         local got = before - invCount(id)
         if got > 0 then
             left -= got
-        elseif not flipped then
+        elseif not flipped and allowFlip ~= false then
             -- di depan tembok / tidak boleh drop: hadap ke arah lain lalu coba lagi
             flipped = true
             local st = playerState()
@@ -5798,6 +5843,202 @@ local function dropTrip(items, live, say)
 end
 Auto.dropTrip = dropTrip
 
+-- Auto Drop memilih item penuh dan menyimpan satu posisi berdiri di world ini.
+do
+    function AutoDrop.targetError()
+        local w = Refs.World
+        if not w or not Refs.Inv or not playerState() then return "Masuk world dan hubungkan referensi game dulu" end
+        if AutoDrop.World == "" or AutoDrop.X < 0 or AutoDrop.Y < 0 then return "Pilih tile drop dulu" end
+        if Guard.worldName() ~= AutoDrop.World then return "Menunggu world " .. AutoDrop.World end
+        if AutoDrop.X >= w.w or AutoDrop.Y >= w.h or not openAt(AutoDrop.X, AutoDrop.Y)
+            or not realSupport(AutoDrop.X, AutoDrop.Y) then return "Tile drop harus bisa dipijak dengan aman" end
+        local frontX = AutoDrop.X + AutoDrop.Facing
+        if frontX < 0 or frontX >= w.w or not openAt(frontX, AutoDrop.Y) then
+            return "Tile di depan posisi drop terhalang"
+        end
+        if not OrigIsDown then return "Kontrol gerak game belum ketemu" end
+        if not Refs.Hud or type(rawget(Refs.Hud, "onDrop")) ~= "function" then return "Fungsi drop game belum ketemu" end
+        return nil
+    end
+
+    function AutoDrop.setPoint(x, y, world)
+        if AutoDrop.Busy then return false, "Tunggu perjalanan drop selesai" end
+        if world ~= Guard.worldName() then return false, "World berubah, buka grid lagi" end
+        if not Refs.World or x < 0 or y < 0 or x >= Refs.World.w or y >= Refs.World.h
+            or not openAt(x, y) or not realSupport(x, y) then
+            return false, "Pilih tile kosong dengan pijakan aman di bawahnya"
+        end
+        AutoDrop.X, AutoDrop.Y, AutoDrop.World = x, y, world
+        AutoDrop.Status = "Tile drop tersimpan"
+        Config.save(true)
+        return true
+    end
+
+    function AutoDrop.beginGrid()
+        if AutoDrop.Busy then return false, "Tunggu perjalanan drop selesai" end
+        local s = playerState()
+        if not s or Guard.worldName() == "" then return false, "Kamu belum masuk world" end
+        local x, y = startNode(s)
+        AutoDrop.Grid = { x = x, y = y, world = Guard.worldName(), fg = Refs.World.fg }
+        AutoDrop.GridSelection = {}
+        if AutoDrop.World == AutoDrop.Grid.world then
+            local dx, dy = AutoDrop.X - x, AutoDrop.Y - y
+            AutoDrop.GridSelection[dx .. "," .. dy] = true
+        end
+        return true
+    end
+
+    function AutoDrop.selectTile(dx, dy)
+        local grid = AutoDrop.Grid
+        if not grid or not Refs.World or grid.fg ~= Refs.World.fg then
+            notify("Auto Drop", "World berubah, buka grid lagi", 4)
+            return
+        end
+        local ok, message = AutoDrop.setPoint(grid.x + dx, grid.y + dy, grid.world)
+        if ok then
+            table.clear(AutoDrop.GridSelection)
+            AutoDrop.GridSelection[dx .. "," .. dy] = true
+            notify("Auto Drop", ("Posisi berdiri untuk drop (%d,%d) tersimpan"):format(AutoDrop.X, AutoDrop.Y), 3)
+        else
+            notify("Auto Drop", message, 4)
+        end
+        if UI.applyGrid then UI.applyGrid() end
+    end
+
+    function AutoDrop.fullItems()
+        local items, seen = {}, {}
+        for _, id in ipairs(AutoDrop.Items) do
+            if type(id) == "number" and not seen[id] then
+                seen[id] = true
+                if invCount(id) >= 200 then items[#items + 1] = id end
+            end
+        end
+        return items
+    end
+
+    function AutoDrop.labels()
+        local ids = {}
+        if Refs.Inv then
+            for _, slot in pairs(Refs.Inv.slots) do
+                if type(slot) == "table" and type(slot.id) == "number" and (slot.n or 0) > 0 then ids[slot.id] = true end
+            end
+        end
+        for _, id in ipairs(AutoDrop.Items) do if type(id) == "number" then ids[id] = true end end
+        local sorted, labels, picked = {}, {}, {}
+        for id in pairs(ids) do sorted[#sorted + 1] = id end
+        table.sort(sorted)
+        for _, id in ipairs(sorted) do
+            local label = ("%s [%d]"):format(itemName(id), id)
+            labels[#labels + 1] = label
+            if table.find(AutoDrop.Items, id) then picked[#picked + 1] = label end
+        end
+        return labels, picked
+    end
+
+    local function protectDrop(id, x, y, world)
+        for _, zone in ipairs(AutoDrop.Zones) do
+            if zone.id == id and zone.world == world and zone.x == x and zone.y == y then return end
+        end
+        AutoDrop.Zones[#AutoDrop.Zones + 1] = { id = id, x = x, y = y, world = world }
+    end
+
+    local function atPoint(x, y, facing)
+        local s = playerState()
+        return s and not s.dead and s.grounded and floor(s.x) == x and floor(s.y - 0.475) == y
+            and (not facing or ((s.facing or 1) < 0 and -1 or 1) == facing)
+    end
+
+    function AutoDrop.trip(items)
+        local world, fg = Refs.World, Refs.World.fg
+        local token = Guard.Token
+        local x, y, facing = AutoDrop.X, AutoDrop.Y, AutoDrop.Facing
+        local hx, hy = startNode(playerState())
+        local saved = Guard.snapshot()
+        AutoDrop.Busy, AutoDrop.Cancelled, AutoDrop.Saved = true, false, saved
+        local function sameWorld()
+            return alive() and not AutoDrop.Cancelled and Guard.Token == token and Guard.Mode == "idle"
+                and Refs.World == world and world.fg == fg and Guard.worldName() == saved.world
+        end
+        local function live() return sameWorld() and AutoDrop.On end
+        local returned, failure = false, nil
+        local ok, err = pcall(function()
+            Guard.stopAll(true)
+            AutoDrop.Status = "Menjeda farming untuk drop"
+            task.wait(1.2)
+            if not live() then return end
+            if not walkTo(x, y, 45, live) or not live() then
+                failure = "Posisi drop tidak terjangkau"
+                return
+            end
+            -- Hadapkan karakter sebelum drop. Lokasi dan arah diperiksa lagi tepat sebelum kirim.
+            AutoInput.active = true
+            local s = playerState()
+            if s and ((s.facing or 1) < 0 and -1 or 1) ~= facing then
+                AutoInput.left, AutoInput.right = facing < 0, facing > 0
+                task.wait(0.04)
+                releaseInput()
+                task.wait(0.15)
+            end
+            local function canDrop() return live() and atPoint(x, y, facing) end
+            if not canDrop() then failure = "Karakter belum berada di tile atau arah drop" return end
+            for _, id in ipairs(items) do
+                if not canDrop() then break end
+                if table.find(AutoDrop.Items, id) and invCount(id) >= 200 then
+                    protectDrop(id, x + 0.5, y + 0.5, saved.world)
+                    AutoDrop.Status = "Drop " .. itemName(id) .. " x200"
+                    local got, reason = dropItems(id, 200, canDrop, false)
+                    AutoDrop.Dropped += got
+                    if reason then failure = reason break end
+                end
+            end
+        end)
+        if not ok then failure = tostring(err) end
+        -- Pulang tetap dilakukan ketika toggle dimatikan di tengah perjalanan.
+        if sameWorld() then
+            AutoDrop.Status = "Kembali ke posisi farming"
+            local backOk, result = pcall(walkTo, hx, hy, 45, sameWorld)
+            returned = backOk and result == true
+            if not backOk then failure = tostring(result) end
+        end
+        Move.Homing, Move.HomingLive = false, nil
+        releaseInput()
+        autoEnd()
+        AutoDrop.Busy, AutoDrop.Saved = false, nil
+        if returned and sameWorld() then
+            local resumed, resumeError = pcall(Guard.resumeActivities, saved, sameWorld)
+            if not resumed then failure = tostring(resumeError) end
+        elseif sameWorld() then
+            AutoDrop.On = false
+            failure = "Gagal kembali ke posisi awal. Auto Drop dihentikan"
+            if UI.AutoDropToggle then UI.later("autoDropOff", function() UI.AutoDropToggle:Set(false) end) end
+        end
+        AutoDrop.NextTry = os.clock() + (failure and 10 or 1)
+        AutoDrop.Status = failure or (AutoDrop.On and "Menunggu item mencapai 200" or "Mati")
+        if failure then notify("Auto Drop", failure, 5) end
+    end
+
+    task.spawn(function()
+        while alive() do
+            task.wait(0.5)
+            if Session.Ready and AutoDrop.On and not AutoDrop.Busy and Guard.Mode == "idle"
+                and not State.DropPause and not Pabrik.Traveling and not Move.Homing
+                and os.clock() >= (AutoDrop.NextTry or 0) then
+                local ok, err = pcall(function()
+                    local reason = AutoDrop.targetError()
+                    if reason then AutoDrop.Status = reason return end
+                    local items = AutoDrop.fullItems()
+                    if #items > 0 then AutoDrop.trip(items) else AutoDrop.Status = "Menunggu item mencapai 200" end
+                end)
+                if not ok then
+                    AutoDrop.Status = tostring(err)
+                    AutoDrop.NextTry = os.clock() + 10
+                    warn("[n4th] Auto Drop: " .. tostring(err))
+                end
+            end
+        end
+    end)
+end
+
 -- Titik drop sudah diatur? (posisi, WORLD:ID, atau world lain)
 function Pabrik.pointSet()
     if Pabrik.DropX >= 0 then return true end
@@ -5824,6 +6065,7 @@ task.spawn(function()
         task.wait(2)
         local seed = State.SelectedId and seedOfBlock(State.SelectedId)
         if State.Running and not State.Override and Pabrik.pointSet() and not State.DropPause and seed
+            and not AutoDrop.Busy and not (AutoDrop.On and table.find(AutoDrop.Items, seed))
             and os.clock() >= (State.DropOffUntil or 0) then
             local n = invCount(seed)
             local s = playerState()
@@ -6004,6 +6246,7 @@ end
 
 function Pabrik.start()
     if Pabrik.Running then return end
+    if AutoDrop.Busy then notify("Auto Drop", "Tunggu perjalanan drop selesai", 3) return end
     local err
     local block = blockOfSeed(Pabrik.SeedId)
     if not Refs.World then
@@ -6700,6 +6943,7 @@ end
 
 function Vend.start()
     if Vend.Running then return end
+    if AutoDrop.Busy then notify("Auto Drop", "Tunggu perjalanan drop selesai", 3) return end
     local err
     if not Refs.World then
         err = "Data world belum ketemu. Tekan 'Hubungkan ke game'"
@@ -7652,6 +7896,7 @@ end
 
 function Build.start()
     if Build.Running then return end
+    if AutoDrop.Busy then notify("Auto Drop", "Tunggu perjalanan drop selesai", 3) return end
     local err
     local it = Build.BlockId and ItemDB[Build.BlockId]
     if not Refs.World then
@@ -8040,9 +8285,10 @@ local COLOR_ON = Color3.fromRGB(46, 160, 90)
 local COLOR_ME = Color3.fromRGB(60, 110, 220)
 local CellButtons = {}
 
--- Grid dipakai untuk 2 hal: tile Auto Farm, atau tile break Pabrik
+-- Grid berbagi mode Farm, Pabrik, Lahan, dan satu posisi Auto Drop.
 UI.GridMode = "farm"
 UI.gridTarget = function()
+    if UI.GridMode == "autodrop" then return AutoDrop.GridSelection or {} end
     if UI.GridMode == "pabrik" then return Pabrik.Tiles end
     if UI.GridMode == "lahan" then return Build.Tiles end
     return State.Offsets
@@ -8050,7 +8296,10 @@ end
 
 local function paintCell(key)
     local b = CellButtons[key]
-    if b then b.BackgroundColor3 = UI.gridTarget()[key] and COLOR_ON or COLOR_OFF end
+    if b then
+        b.BackgroundColor3 = UI.gridTarget()[key] and COLOR_ON
+            or (key == "0,0" and COLOR_ME or COLOR_OFF)
+    end
 end
 
 for row = 0, side - 1 do
@@ -8070,11 +8319,16 @@ for row = 0, side - 1 do
             btn.Text = "ME"
             btn.BackgroundColor3 = COLOR_ME
             btn.AutoButtonColor = false
+            CellButtons[key] = btn
+            btn.MouseButton1Click:Connect(function()
+                if UI.GridMode == "autodrop" then AutoDrop.selectTile(0, 0) end
+            end)
         else
             btn.Text = ""
             btn.BackgroundColor3 = UI.gridTarget()[key] and COLOR_ON or COLOR_OFF
             CellButtons[key] = btn
             btn.MouseButton1Click:Connect(function()
+                if UI.GridMode == "autodrop" then AutoDrop.selectTile(dx, dy) return end
                 local tgt = UI.gridTarget()
                 tgt[key] = (not tgt[key]) or nil
                 paintCell(key)
@@ -8096,7 +8350,9 @@ GridStart.Parent = Panel
 Instance.new("UICorner", GridStart).CornerRadius = UDim.new(0, 8)
 UI.GridStart = GridStart
 GridStart.MouseButton1Click:Connect(function()
-    if UI.GridMode == "lahan" then
+    if UI.GridMode == "autodrop" then
+        GridGui.Enabled = false
+    elseif UI.GridMode == "lahan" then
         if Build.Running then Build.stop() elseif Build.start then Build.start() end
     elseif UI.GridMode == "pabrik" then
         if Pabrik.Running then Pabrik.stop() else Pabrik.start() end
@@ -8117,6 +8373,15 @@ ClearBtn.TextColor3 = Color3.fromRGB(180, 180, 195)
 ClearBtn.Text = I18N.T("Bersihkan pilihan")
 ClearBtn.Parent = Panel
 ClearBtn.MouseButton1Click:Connect(function()
+    if UI.GridMode == "autodrop" then
+        if not AutoDrop.Busy then
+            AutoDrop.X, AutoDrop.Y, AutoDrop.World = -1, -1, ""
+            table.clear(AutoDrop.GridSelection)
+            Config.save(true)
+            if UI.applyGrid then UI.applyGrid() end
+        end
+        return
+    end
     local tgt = UI.gridTarget()
     for key in pairs(tgt) do
         tgt[key] = nil
@@ -8140,12 +8405,20 @@ do (function()
     local function apply()
         local pab = UI.GridMode == "pabrik"
         local lah = UI.GridMode == "lahan"
+        local drop = UI.GridMode == "autodrop"
         ModeBtn.Text = lah and I18N.T("Lahan") or (pab and I18N.T("Pabrik") or "Farm")
         ModeBtn.BackgroundColor3 = lah and Color3.fromRGB(60, 140, 200)
             or (pab and Color3.fromRGB(200, 120, 40) or Color3.fromRGB(60, 60, 75))
         Title.Text = I18N.T(lah and "Tile Break Lahan" or (pab and "Tile Break Pabrik" or "Grid Tile"))
+        if drop then
+            ModeBtn.Text = "Drop"
+            Title.Text = I18N.T("Pilih posisi berdiri untuk drop")
+        end
         for key in pairs(CellButtons) do paintCell(key) end
-        if lah then
+        if drop then
+            GridStart.Text = I18N.T("Selesai")
+            GridStart.BackgroundColor3 = COLOR_ON
+        elseif lah then
             GridStart.Text = I18N.T(Build.Running and "STOP LAHAN" or "START LAHAN")
             GridStart.BackgroundColor3 = Build.Running and Color3.fromRGB(200, 60, 60) or COLOR_ON
         elseif pab then
@@ -8159,11 +8432,17 @@ do (function()
     end
 
     UI.setGridMode = function(m)
+        if m == "autodrop" then
+            local ok, message = AutoDrop.beginGrid()
+            if not ok then notify("Auto Drop", message, 4) return false end
+        end
         UI.GridMode = m
         apply()
+        return true
     end
+    UI.applyGrid = apply
     ModeBtn.MouseButton1Click:Connect(function() -- Farm -> Pabrik -> Lahan -> Farm
-        local nxt = { farm = "pabrik", pabrik = "lahan", lahan = "farm" }
+        local nxt = { farm = "pabrik", pabrik = "lahan", lahan = "autodrop", autodrop = "farm" }
         UI.setGridMode(nxt[UI.GridMode] or "farm")
     end)
     apply()
@@ -8431,9 +8710,147 @@ safe(function()
     Box.FarmCtl:Button({
         Title = "Buka Grid Tile",
         Desc = "Kotak 5x5, tengah = karakter",
-        Callback = function() GridGui.Enabled = true end,
+        Callback = function() UI.setGridMode("farm") GridGui.Enabled = true end,
     })
 end)
+
+-- ===== TAB: AUTO DROP =====
+do (function()
+    local tab = makeTab("Auto Drop", "package-open", "farm")
+    safe(function() UI.AutoDropStatus = tab:Paragraph({ Title = "Status", Desc = "-" }) end)
+    local controls = box(tab, "Kontrol", true)
+    local itemBox = box(tab, "Item", true)
+    local pointBox = box(tab, "Atur titik drop", true)
+
+    safe(function()
+        UI.AutoDropToggle = controls:Toggle({
+            Title = "Pantau item penuh",
+            Desc = "Item mencapai 200 lalu dibawa ke tile drop. Setelah itu kembali dan lanjut farming.",
+            Value = false,
+            Callback = function(on)
+                if on then
+                    local reason = #AutoDrop.Items == 0 and "Pilih item dulu" or AutoDrop.targetError()
+                    if reason then
+                        AutoDrop.On = false
+                        notify("Auto Drop", reason, 4)
+                        UI.later("autoDropOff", function() UI.AutoDropToggle:Set(false) end)
+                        return
+                    end
+                end
+                AutoDrop.On = on
+                AutoDrop.NextTry = 0
+                AutoDrop.Status = on and "Menunggu item mencapai 200" or "Mati"
+            end,
+        })
+    end)
+
+    safe(function()
+        local labels, picked = AutoDrop.labels()
+        UI.AutoDropItems = itemBox:Dropdown({
+            Title = "Item yang di-drop",
+            Desc = "Pilih item inventori. Setiap item yang mencapai 200 di-drop sebanyak 200.",
+            Values = #labels > 0 and labels or { "(inventori kosong / belum terbaca)" },
+            Value = picked,
+            Multi = true,
+            AllowNone = true,
+            Callback = function(options)
+                if UI.AutoDropRefreshing then return end
+                if AutoDrop.Busy then
+                    notify("Auto Drop", "Tunggu perjalanan drop selesai", 3)
+                    UI.later("autoDropItems", function() UI.AutoDropRefresh(true) end)
+                    return
+                end
+                local items, seen = {}, {}
+                for _, label in ipairs(type(options) == "table" and options or { options }) do
+                    local id = tonumber(tostring(label):match("%[(%d+)%]$"))
+                    if id and not seen[id] then items[#items + 1], seen[id] = id, true end
+                end
+                AutoDrop.Items = items
+                if Session.Ready then Config.save(true) end
+            end,
+        })
+    end)
+
+    local lastSig
+    UI.AutoDropRefresh = function(force)
+        if not UI.AutoDropItems then return end
+        local labels, picked = AutoDrop.labels()
+        local signature = table.concat(labels, "|") .. "/" .. table.concat(picked, "|")
+        if not force and signature == lastSig then return end
+        local ok = UI.exec(function()
+            UI.AutoDropRefreshing = true
+            local refreshed, refreshError = pcall(function()
+                UI.AutoDropItems:Refresh(#labels > 0 and labels or { "(inventori kosong / belum terbaca)" })
+                UI.AutoDropItems:Select(#picked > 0 and picked or nil)
+            end)
+            UI.AutoDropRefreshing = false
+            if not refreshed then error(refreshError, 0) end
+        end)
+        if ok then lastSig = signature end
+    end
+    safe(function()
+        itemBox:Button({
+            Title = "Refresh daftar item",
+            Callback = function() UI.later("autoDropItems", function() UI.AutoDropRefresh(true) end) end,
+        })
+    end)
+    safe(function()
+        pointBox:Button({
+            Title = "Pilih tile drop",
+            Desc = "Pilih satu tile di grid 5x5. Tile disimpan sebagai posisi berdiri di world ini.",
+            Callback = function()
+                if UI.setGridMode("autodrop") then GridGui.Enabled = true end
+            end,
+        })
+    end)
+    safe(function()
+        pointBox:Button({
+            Title = "Pakai tile tempat berdiri sekarang",
+            Callback = function()
+                local x, y = Auto.here()
+                if not x then notify("Auto Drop", "Kamu belum masuk world", 3) return end
+                local ok, message = AutoDrop.setPoint(x, y, Guard.worldName())
+                notify("Auto Drop", ok and ("Tile (%d,%d) tersimpan"):format(x, y) or message, 4)
+            end,
+        })
+    end)
+    safe(function()
+        UI.AutoDropFacing = pointBox:Dropdown({
+            Title = "Arah drop",
+            Desc = "Item jatuh di depan karakter sesuai arah drop.",
+            Values = { "Kanan", "Kiri" },
+            Value = AutoDrop.Facing < 0 and "Kiri" or "Kanan",
+            Callback = function(option)
+                if type(option) == "table" then option = option[1] end
+                if AutoDrop.Busy then
+                    UI.later("autoDropFacing", function()
+                        UI.AutoDropFacing:Select(AutoDrop.Facing < 0 and "Kiri" or "Kanan")
+                    end)
+                    return
+                end
+                AutoDrop.Facing = option == "Kiri" and -1 or 1
+                if Session.Ready then Config.save(true) end
+            end,
+        })
+    end)
+
+    task.spawn(function()
+        while alive() do
+            local point = AutoDrop.X >= 0 and ("%s (%d,%d)"):format(AutoDrop.World, AutoDrop.X, AutoDrop.Y) or "-"
+            local counts = {}
+            for _, id in ipairs(AutoDrop.Items) do counts[#counts + 1] = itemName(id) .. " " .. invCount(id) .. "/200" end
+            local text = table.concat({
+                I18N.T(AutoDrop.Status), point,
+                table.concat(counts, " | "), ("Dropped: %d"):format(AutoDrop.Dropped),
+            }, "\n")
+            if UI.AutoDropStatus and text ~= AutoDrop.Shown then
+                AutoDrop.Shown = text
+                UI.later("autoDropStatus", function() UI.AutoDropStatus:SetDesc(text) end)
+            end
+            task.wait(0.5)
+        end
+    end)
+end)() end
 
 -- ===== TAB: CLEAR WORLD =====
 local ClearTab = makeTab("Clear World", "eraser", "farm")
@@ -8913,20 +9330,22 @@ do (function() -- fungsi sendiri: variabel di dalam tidak ikut batas 200 local
 
     local function anyRunning()
         return State.Running or Clear.Running or Farmer.Running or Splice.Running or Spam.On
-            or Pabrik.Running or Build.Running
+            or Pabrik.Running or Build.Running or Vend.Running or AutoDrop.On or AutoDrop.Busy
     end
 
     -- Catat aktivitas yang sedang jalan (untuk dilanjutkan nanti)
     local function snapshot()
+        if AutoDrop.Busy and AutoDrop.Saved then return AutoDrop.Saved end
         local tx, ty = Auto.here()
         return {
             farm = State.Running and not State.Override, clear = Clear.Running, farmer = Farmer.Running,
-            spam = Spam.On, splice = Splice.Running, pabrik = Pabrik.Running, build = Build.Running,
+            spam = Spam.On, splice = Splice.Running, pabrik = Pabrik.Running, build = Build.Running, vend = Vend.Running,
             world = worldName(), tx = tx, ty = ty,
         }
     end
 
-    local function stopAll()
+    local function stopAll(forAutoDrop)
+        if AutoDrop.Busy and not forAutoDrop then AutoDrop.Cancelled = true end
         Auto.stopWalk()
         if Pabrik.Running then Pabrik.stop() end
         if Build.Running then Build.stop() end
@@ -8989,41 +9408,47 @@ do (function() -- fungsi sendiri: variabel di dalam tidak ikut batas 200 local
     end
 
     -- Lanjutkan aktivitas yang tadi dihentikan
-    local function resumeAll(saved, token)
+    local function resumeAll(saved, token, live)
         if not saved then return end
+        local function active()
+            if live then return live() end
+            return stillBack(token)
+        end
         if saved.world ~= "" and worldName() ~= saved.world then
             notify("Penjaga", "World sudah beda, aktivitas tidak dilanjutkan", 5)
             return
         end
-        if saved.spam and not Spam.On and stillBack(token) then
+        if saved.spam and not Spam.On and active() then
             if UI.SpamToggle then pcall(function() UI.SpamToggle:Set(true) end) end
             Spam.On = true
         end
         if saved.build then
-            if stillBack(token) then Build.start() end
+            if active() then Build.start() end
         elseif saved.pabrik then
-            if stillBack(token) then Pabrik.start() end
+            if active() then Pabrik.start() end
+        elseif saved.vend then
+            if active() then Vend.start() end
         elseif saved.farm then
             -- Auto Farm memakai tile di sekitar karakter, jadi harus balik ke posisi awal
             local hx, hy = Auto.here()
             if saved.tx and (hx ~= saved.tx or hy ~= saved.ty) then
                 Guard.BackText = ("Jalan balik ke posisi farm (%d,%d)"):format(saved.tx, saved.ty)
                 local ok = Auto.walkTo(saved.tx, saved.ty, 45)
-                if not ok and stillBack(token) then ok = Auto.walkTo(saved.tx, saved.ty, 30) end
+                if not ok and active() then ok = Auto.walkTo(saved.tx, saved.ty, 30) end
                 if not ok then
-                    if stillBack(token) then
+                    if active() then
                         notify("Penjaga", "Gagal balik ke posisi farm. Auto Farm tidak dilanjutkan", 6)
                     end
                     return
                 end
             end
-            if stillBack(token) then startFarm() end
+            if active() then startFarm() end
         elseif saved.clear then
-            if stillBack(token) then Auto.startClear() end
+            if active() then Auto.startClear() end
         elseif saved.farmer then
-            if stillBack(token) then Auto.startFarmer() end
+            if active() then Auto.startFarmer() end
         elseif saved.splice then
-            if stillBack(token) and Splice.start then Splice.start() end
+            if active() and Splice.start then Splice.start() end
         end
     end
 
@@ -9238,6 +9663,7 @@ do (function() -- fungsi sendiri: variabel di dalam tidak ikut batas 200 local
 
     -- dipakai fitur lain (Auto Reconnect)
     Guard.snapshot = snapshot
+    Guard.resumeActivities = function(saved, live) return resumeAll(saved, nil, live) end
     Guard.stopAll = stopAll
     Guard.enterWorld = enterWorld
     Guard.leaveWorld = leaveWorld
@@ -10112,6 +10538,7 @@ do (function()
     end
 
     function Bag.tick()
+        if AutoDrop.Busy then return end
         if Bag.TrashOn then
             for _, id in ipairs(Bag.TrashList) do
                 local n = invCount(id)
@@ -10358,6 +10785,7 @@ do (function()
 
     function Splice.start()
         if Splice.Running then return end
+        if AutoDrop.Busy then notify("Auto Drop", "Tunggu perjalanan drop selesai", 3) return end
         local err
         if not Refs.World then
             err = "Data world belum ketemu. Tekan 'Hubungkan ke game'"
@@ -11761,6 +12189,7 @@ end)
 -- CLEANUP (otomatis saat script dijalankan ulang)
 ---------------------------------------------------------------------
 Session.Cleanup = function()
+    AutoDrop.On, AutoDrop.Cancelled = false, true
     State.Running = false
     Clear.Running = false
     Farmer.Running = false
