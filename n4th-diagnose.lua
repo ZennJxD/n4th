@@ -16,9 +16,24 @@ local function info(fn, option)
         local ok, result = pcall(debug.info, fn, option)
         if ok then return result end
     end
+    if option == "s" and debug and type(debug.getinfo) == "function" then
+        local ok, result = pcall(debug.getinfo, fn, "S")
+        if ok and type(result) == "table" then return result.source or result.short_src or "?" end
+    end
     return "?"
 end
-local constants = (debug and debug.getconstants) or getconstants
+local constants
+if type(debug and debug.getconstants) == "function" or type(getconstants) == "function" then
+    constants = function(fn)
+        for _, api in ipairs({ (debug and debug.getconstants) or false, getconstants or false }) do
+            if type(api) == "function" then
+                local ok, values = pcall(api, fn)
+                if ok and type(values) == "table" and next(values) ~= nil then return values end
+            end
+        end
+        return {}
+    end
+end
 local function describeFunction(fn)
     local result = "name=" .. tostring(info(fn, "n")) .. " | parameters=" .. tostring(info(fn, "a"))
         .. " | source=" .. tostring(info(fn, "s"))
@@ -37,8 +52,10 @@ local function describeFunction(fn)
     end
     return result
 end
-emit("n4th diagnosis v3 | Place=" .. tostring(game.PlaceId) .. " | Version=" .. tostring(game.PlaceVersion))
+emit("n4th diagnosis v4 | Place=" .. tostring(game.PlaceId) .. " | Version=" .. tostring(game.PlaceVersion))
 emit("API getgc=" .. type(getgc) .. " | constants=" .. type(constants) .. " | getconnections=" .. type(getconnections))
+emit("Raw API constants debug=" .. type(debug and debug.getconstants) .. " global=" .. type(getconstants)
+    .. " | upvalues debug=" .. type(debug and debug.getupvalues) .. " global=" .. type(getupvalues))
 local globals = (getgenv and getgenv()) or _G
 local session = globals.__n4thOpus
 emit("Session build=" .. tostring(session and session.Build) .. " | ready=" .. tostring(session and session.Ready))
@@ -50,6 +67,8 @@ if session and type(session.References) == "table" then
     local refs = session.References
     emit("Session World=" .. type(refs.World) .. " | Inventory=" .. type(refs.Inv) .. " | Hit=" .. type(refs.Punch)
         .. " | setTile=" .. type(refs.SetTile) .. " | GC visited=" .. tostring(refs.ScanCount))
+    emit("Connection objects visited=" .. tostring(refs.ConnectionCount))
+    if type(refs.Punch) == "function" then emit("Bound punch: " .. describeFunction(refs.Punch)) end
     if refs.ScanError then emit("Session scan error=" .. tostring(refs.ScanError)) end
     if type(refs.World) == "table" then
         emit("Session World keys: " .. keysOf(refs.World, 350))
@@ -82,6 +101,7 @@ if type(getgc) ~= "function" then
     emit("STOP: executor tidak menyediakan getgc")
 else
     local ok, objects = pcall(getgc, true)
+    if not ok or type(objects) ~= "table" then ok, objects = pcall(getgc) end
     if not ok or type(objects) ~= "table" then
         emit("STOP: getgc gagal: " .. tostring(objects))
     else
@@ -136,9 +156,7 @@ else
                 local source = tostring(info(value, "s"))
                 sources[source] = (sources[source] or 0) + 1
                 local functionName = tostring(info(value, "n")):lower()
-                if source:find("GameGui", 1, true) or source:find("PlayerScripts", 1, true)
-                    or source:find("ReplicatedStorage", 1, true) or functionName == "punch"
-                    or functionName == "settile" or functionName == "hittile" then
+                do -- source metadata bisa kosong/generik pada executor tertentu
                     examined += 1
                     local got, data = pcall(constants, value)
                     if got and type(data) == "table" then
@@ -168,7 +186,7 @@ else
         end
         table.sort(candidates, function(a, b) return a.score > b.score end)
         emit("Actually visited=" .. visited .. " | tables=" .. tostring(types.table or 0) .. " | functions=" .. tostring(types["function"] or 0))
-        emit("Game functions=" .. examined .. " | constants readable=" .. readable .. " | constant values=" .. constantCount)
+        emit("Scanned functions=" .. examined .. " | constants readable=" .. readable .. " | constant values=" .. constantCount)
         local sourceList = {}
         for source, count in pairs(sources) do sourceList[#sourceList + 1] = {source=source, count=count} end
         table.sort(sourceList, function(a, b) return a.count > b.count end)

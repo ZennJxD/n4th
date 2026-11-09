@@ -5,12 +5,45 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = nama versi l
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-09-language-remember-1"
+Session.Build = "2026-11-09-executor-punch-1"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
 end
 Session.InitStep = "layanan game"
+function Session.download(url)
+    local lastError = "respons kosong"
+    local function checked(source)
+        if type(source) ~= "string" or source:match("^%s*$") then return nil, "respons kosong" end
+        if source:match("^%s*<") then return nil, "server mengirim HTML, bukan script/metadata" end
+        if source:match("^%s*[45]%d%d[:%s]") then return nil, source:sub(1, 120) end
+        return source
+    end
+    local ok, source = pcall(function() return game:HttpGet(url) end)
+    if ok then
+        local valid, reason = checked(source)
+        if valid then return valid end
+        lastError = reason
+    else lastError = tostring(source) end
+    local seen = {}
+    for _, api in ipairs({ request or false, http_request or false, (syn and syn.request) or false, (http and http.request) or false }) do
+        if type(api) == "function" and not seen[api] then
+            seen[api] = true
+            local sent, response = pcall(api, { Url = url, Method = "GET" })
+            if sent and type(response) == "table" then
+                local status = tonumber(response.StatusCode or response.Status)
+                if status and (status < 200 or status >= 300) then
+                    lastError = "HTTP " .. tostring(status)
+                else
+                    local valid, reason = checked(response.Body or response.body)
+                    if valid then return valid end
+                    lastError = reason
+                end
+            else lastError = tostring(response) end
+        end
+    end
+    error("[n4th] Unduh gagal: " .. tostring(lastError), 0)
+end
 print("[n4th] Memuat build " .. Session.Build)
 task.delay(45, function()
     if alive() and not Session.Ready then
@@ -123,7 +156,7 @@ do
         local lastError = "respons kosong"
         for attempt = 1, 2 do
             for _, url in ipairs(urls) do
-                local ok, source = pcall(function() return game:HttpGet(url) end)
+                local ok, source = pcall(Session.download, url)
                 if not ok then
                     lastError = tostring(source)
                 elseif type(source) ~= "string" or source:match("^%s*$") then
@@ -1475,7 +1508,42 @@ end)() end
 ---------------------------------------------------------------------
 -- CARI DATA & FUNGSI GAME (getgc)
 ---------------------------------------------------------------------
-local getconsts = (debug and debug.getconstants) or getconstants
+local function getconsts(fn)
+    -- Beberapa executor memasang API debug yang ada tetapi hanya mengembalikan tabel kosong.
+    local previous
+    for _, api in ipairs({ (debug and debug.getconstants) or false, getconstants or false }) do
+        if type(api) == "function" and api ~= previous then
+            previous = api
+            local ok, values = pcall(api, fn)
+            if ok and type(values) == "table" and next(values) ~= nil then return values end
+        end
+    end
+    return {}
+end
+
+local function getUpvalues(fn)
+    for _, api in ipairs({ (debug and debug.getupvalues) or false, getupvalues or false }) do
+        if type(api) == "function" then
+            local ok, values = pcall(api, fn)
+            if ok and type(values) == "table" and next(values) ~= nil then return values end
+        end
+    end
+    for _, api in ipairs({ (debug and debug.getupvalue) or false, getupvalue or false }) do
+        if type(api) == "function" then
+            local out = {}
+            for i = 1, 80 do
+                local ok, first, second = pcall(api, fn, i)
+                if not ok then break end
+                -- Executor umumnya mengembalikan nilai; API Lua juga bisa mengembalikan nama, nilai.
+                local value = first
+                if second ~= nil then value = second end
+                if value ~= nil then out[i] = value end
+            end
+            if next(out) ~= nil then return out end
+        end
+    end
+    return {}
+end
 
 -- Sesudah update, require executor dapat menghasilkan tabel kelas yang berbeda
 -- dari metatable instance inventori aktif. Validasi API dan bentuk slot-nya.
@@ -1495,7 +1563,6 @@ end
 -- Kirimnya "tile" (game baru, ByteNet) atau "SetTile" (game lama).
 local function isSetTileFn(fn)
     if not getconsts then return false end
-    if islclosure and not islclosure(fn) then return false end
     local ok, consts = pcall(getconsts, fn)
     if not ok or type(consts) ~= "table" then return false end
     local hasSend, hasPlaced, hasFlips = false, false, false
@@ -1511,12 +1578,11 @@ end
 -- (game lama: "HarvestProvider")
 local function isPunchFn(fn)
     if not getconsts then return false end
-    if islclosure and not islclosure(fn) then return false end
     local ok, consts = pcall(getconsts, fn)
     if not ok or type(consts) ~= "table" then return false end
     local hasVend, hasMark = false, false
     for _, c in pairs(consts) do
-        if c == "Empty the Vending Machine first!" then hasVend = true
+        if type(c) == "string" and c:lower():find("empty", 1, true) and c:lower():find("vending", 1, true) then hasVend = true
         elseif c == "newCrack" or c == "HarvestProvider" then hasMark = true end
     end
     return hasVend and hasMark
@@ -1525,7 +1591,6 @@ end
 -- Fungsi game yang menggambar tangan karakter saat memukul / memasang
 function Anim.isArmFn(fn)
     if not getconsts then return false end
-    if islclosure and not islclosure(fn) then return false end
     local ok, consts = pcall(getconsts, fn)
     if not ok or type(consts) ~= "table" then return false end
     local a, b, c = false, false, false
@@ -1571,34 +1636,102 @@ end
 -- Pastikan fungsi milik game, bukan milik script ini
 local function isGameFn(fn)
     if fn == isSetTileFn or fn == isPunchFn then return false end
+    local sources = {}
+    if debug and type(debug.info) == "function" then
+        local ok, src = pcall(debug.info, fn, "s")
+        if ok and type(src) == "string" then sources[#sources + 1] = src end
+    end
+    if debug and type(debug.getinfo) == "function" then
+        local ok, info = pcall(debug.getinfo, fn, "S")
+        if ok and type(info) == "table" then
+            if type(info.source) == "string" then sources[#sources + 1] = info.source end
+            if type(info.short_src) == "string" then sources[#sources + 1] = info.short_src end
+        end
+    end
+    for _, src in ipairs(sources) do
+        if src:find("GameGui", 1, true) or src:find("PlayerScripts", 1, true)
+            or src:find("ReplicatedStorage", 1, true) then return true end
+    end
     if isexecutorclosure then
         local ok, res = pcall(isexecutorclosure, fn)
         if ok and res then return false end
     end
-    local ok, src = pcall(debug.info, fn, "s")
-    if ok and type(src) == "string" and src ~= "" then
-        return string.find(src, "GameGui", 1, true) ~= nil
-            or string.find(src, "PlayerScripts", 1, true) ~= nil
-            or string.find(src, "ReplicatedStorage", 1, true) ~= nil
+    for _, src in ipairs(sources) do
+        if src:find("n4th-main", 1, true) or src == "executor" or src == "[C]" or src == "=[C]" then return false end
     end
     return true
 end
 
+function Anim.consider(v, trusted)
+    local tv = type(v)
+    if tv == "table" then
+        if not Refs.World then
+            local ok, isWorld = pcall(function()
+                return type(rawget(v, "fg")) == "table" and type(rawget(v, "bg")) == "table"
+                    and type(rawget(v, "w")) == "number" and type(rawget(v, "h")) == "number"
+                    and rawget(v, "spawn") ~= nil
+            end)
+            if ok and isWorld then Refs.World = v end
+        end
+        if not Refs.Inv then
+            local ok, isInv = pcall(function()
+                return isInventory(v)
+            end)
+            if ok and isInv then Refs.Inv = v end
+        end
+        if not Refs.State then
+            local ok, isHolder = pcall(isStateHolder, v)
+            if ok and isHolder then Refs.State = rawget(v, "state") end
+        end
+        if not Refs.Menu then
+            local ok, isMenu = pcall(function()
+                return type(rawget(v, "openBackpack")) == "function" and type(rawget(v, "ui")) == "table"
+            end)
+            if ok and isMenu then Refs.Menu = v end
+        end
+        if not Refs.Gems then
+            local ok, isG = pcall(function() return type(rawget(v, "addGems")) == "function" end)
+            if ok and isG then Refs.Gems = v end
+        end
+        if not Refs.Hud then
+            local ok, isH = pcall(function()
+                return type(rawget(v, "punchRange")) == "function" and type(rawget(v, "handPower")) == "function"
+            end)
+            if ok and isH then Refs.Hud = v end
+        end
+        if not Refs.Others then
+            -- data pemain lain: punya list(), where(), playerAt()
+            local ok, isO = pcall(function()
+                return type(rawget(v, "list")) == "function" and type(rawget(v, "where")) == "function"
+                    and type(rawget(v, "playerAt")) == "function"
+            end)
+            if ok and isO then Refs.Others = v end
+        end
+        if ParticlesOk then
+            local ok, isP = pcall(function()
+                return getmetatable(v) == ParticlesModule and type(rawget(v, "live")) == "table"
+                    and type(rawget(v, "free")) == "table"
+            end)
+            if ok and isP and not table.find(Refs.Particles, v) then table.insert(Refs.Particles, v) end
+        end
+    elseif tv == "function" and (not Refs.SetTile or not Refs.Punch) and v ~= isPunchFn and v ~= isSetTileFn and (trusted or isGameFn(v)) then
+        if not Refs.SetTile and isSetTileFn(v) then
+            Refs.SetTile = v
+        elseif not Refs.Punch and isPunchFn(v) then
+            Refs.Punch = v
+        end
+    end
+end
+
 local function findRefs()
-    -- World/Inv sudah dipindai ulang dari koneksi aktif oleh reconnect.
-    Refs.SetTile, Refs.State, Refs.Punch, Refs.Menu = nil, nil, nil, nil
-    Refs.Gems = nil
-    Refs.Hud = nil
-    Refs.Others = nil
-    Refs.Arm = nil
-    Refs.Particles = {}
-    Anim.Particles = nil
+    -- Reconnect sudah mengosongkan referensi lama. Pertahankan hasil koneksi input aktif.
     Refs.ScanCount, Refs.ScanError = 0, nil
     if type(getgc) ~= "function" then
         Refs.ScanError = "Executor tidak punya getgc()"
         return Refs.World ~= nil, Refs.ScanError
     end
     local gcOk, objects = pcall(getgc, true)
+    if not gcOk or type(objects) ~= "table" then gcOk, objects = pcall(getgc) end
     if not gcOk or type(objects) ~= "table" then
         Refs.ScanError = "getgc gagal: " .. tostring(objects)
         return Refs.World ~= nil, Refs.ScanError
@@ -1607,64 +1740,7 @@ local function findRefs()
     -- ipairs berhenti di lubang pertama dan melewatkan objek yang masih valid.
     for _, v in pairs(objects) do
         Refs.ScanCount += 1
-        local tv = type(v)
-        if tv == "table" then
-            if not Refs.World then
-                local ok, isWorld = pcall(function()
-                    return type(rawget(v, "fg")) == "table" and type(rawget(v, "bg")) == "table"
-                        and type(rawget(v, "w")) == "number" and type(rawget(v, "h")) == "number"
-                        and rawget(v, "spawn") ~= nil
-                end)
-                if ok and isWorld then Refs.World = v end
-            end
-            if not Refs.Inv then
-                local ok, isInv = pcall(function()
-                    return isInventory(v)
-                end)
-                if ok and isInv then Refs.Inv = v end
-            end
-            if not Refs.State then
-                local ok, isHolder = pcall(isStateHolder, v)
-                if ok and isHolder then Refs.State = rawget(v, "state") end
-            end
-            if not Refs.Menu then
-                local ok, isMenu = pcall(function()
-                    return type(rawget(v, "openBackpack")) == "function" and type(rawget(v, "ui")) == "table"
-                end)
-                if ok and isMenu then Refs.Menu = v end
-            end
-            if not Refs.Gems then
-                local ok, isG = pcall(function() return type(rawget(v, "addGems")) == "function" end)
-                if ok and isG then Refs.Gems = v end
-            end
-            if not Refs.Hud then
-                local ok, isH = pcall(function()
-                    return type(rawget(v, "punchRange")) == "function" and type(rawget(v, "handPower")) == "function"
-                end)
-                if ok and isH then Refs.Hud = v end
-            end
-            if not Refs.Others then
-                -- data pemain lain: punya list(), where(), playerAt()
-                local ok, isO = pcall(function()
-                    return type(rawget(v, "list")) == "function" and type(rawget(v, "where")) == "function"
-                        and type(rawget(v, "playerAt")) == "function"
-                end)
-                if ok and isO then Refs.Others = v end
-            end
-            if ParticlesOk then
-                local ok, isP = pcall(function()
-                    return getmetatable(v) == ParticlesModule and type(rawget(v, "live")) == "table"
-                        and type(rawget(v, "free")) == "table"
-                end)
-                if ok and isP then table.insert(Refs.Particles, v) end
-            end
-        elseif tv == "function" and (not Refs.SetTile or not Refs.Punch) and isGameFn(v) then
-            if not Refs.SetTile and isSetTileFn(v) then
-                Refs.SetTile = v
-            elseif not Refs.Punch and isPunchFn(v) then
-                Refs.Punch = v
-            end
-        end
+        Anim.consider(v)
         if Refs.World and Refs.Inv and Refs.SetTile and Refs.State and Refs.Punch
             and Refs.Menu and Refs.Gems and Refs.Hud and Refs.Others then break end
         if Refs.ScanCount % 2000 == 0 then task.wait() end
@@ -2075,8 +2151,6 @@ end
 -- Game cuma ambil drop yang disentuh badan; di sini drop diambil langsung.
 local TakeDropRemote = WorldRemotes and WorldRemotes:FindFirstChild("TakeDrop") -- game lama saja
 
-local getUpvalues -- (didefinisikan di bawah)
-
 -- Fungsi tangan game dipanggil dari fungsi gambar yang terhubung ke RenderStepped:
 -- cukup periksa upvalue fungsi-fungsi itu (jauh lebih ringan dari scan getgc).
 function Anim.findFast()
@@ -2086,7 +2160,7 @@ function Anim.findFast()
         if okS and sig then
             local ok, conns = pcall(getconnections, sig)
             if ok and type(conns) == "table" then
-                for _, c in ipairs(conns) do
+                for _, c in pairs(conns) do
                     local okf, fn = pcall(function() return c.Function end)
                     if okf and type(fn) == "function" then
                         for _, u in pairs(getUpvalues(fn)) do
@@ -2106,10 +2180,17 @@ end
 -- Cari data world & isi tas cepat: telusuri upvalue fungsi game yang terhubung ke RunService
 -- (fungsi gambar / update game memegang tabel-tabel itu). Maks 400 fungsi, tanpa getgc.
 function Anim.quickRefs()
-    if not getconnections then return false end
+    if type(getconnections) ~= "function" then return false end
     local queue, seen, n = {}, {}, 0
+    local function push(value)
+        local kind = type(value)
+        if (kind == "function" or kind == "table") and not seen[value] then
+            seen[value] = true
+            queue[#queue + 1] = value
+        end
+    end
     for _, entry in ipairs({
-        { RunService, { "RenderStepped", "Heartbeat", "Stepped" } },
+        { RunService, { "RenderStepped", "Heartbeat", "PreRender", "Stepped" } },
         { UserInputService, { "InputBegan", "InputEnded", "TouchTap" } },
     }) do
         for _, name in ipairs(entry[2]) do
@@ -2117,61 +2198,35 @@ function Anim.quickRefs()
             if okS and sig then
                 local ok, conns = pcall(getconnections, sig)
                 if ok and type(conns) == "table" then
-                    for _, c in pairs(conns) do
-                        local okf, fn = pcall(function() return c.Function end)
-                        if okf and type(fn) == "function" then queue[#queue + 1] = fn end
+                    for _, connection in pairs(conns) do
+                        local okf, fn = pcall(function()
+                            return type(connection) == "function" and connection or connection.Function
+                        end)
+                        if okf then push(fn) end
                     end
                 end
             end
         end
     end
+    -- World/tas bisa ditemukan lebih dulu; tetap lanjut sampai fungsi aksi juga ditemukan.
     local i = 1
-    while i <= #queue and n < 400 and not (Refs.Inv and Refs.World) do
-        local fn = queue[i]
-        i += 1
-        if not seen[fn] then
-            seen[fn] = true
-            n += 1
-            for _, u in pairs(getUpvalues(fn)) do
-                local tu = type(u)
-                if tu == "table" then
-                    if not Refs.Inv then
-                        local ok, isInv = pcall(function()
-                            return isInventory(u)
-                        end)
-                        if ok and isInv then Refs.Inv = u end
-                    end
-                    if not Refs.World then
-                        local ok, isWorld = pcall(function()
-                            return type(rawget(u, "fg")) == "table" and type(rawget(u, "bg")) == "table"
-                                and type(rawget(u, "w")) == "number" and rawget(u, "spawn") ~= nil
-                        end)
-                        if ok and isWorld then Refs.World = u end
-                    end
-                elseif tu == "function" and not seen[u] then
-                    queue[#queue + 1] = u
-                end
+    while i <= #queue and n < 900 do
+        local value = queue[i]
+        i, n = i + 1, n + 1
+        Anim.consider(value, true)
+        if Refs.Inv and Refs.World and Refs.Punch and Refs.SetTile and Refs.State and Refs.Menu then break end
+        if type(value) == "function" then
+            for _, upvalue in pairs(getUpvalues(value)) do push(upvalue) end
+        elseif value ~= ItemDB and value ~= InventoryModule then
+            -- Fungsi game kadang tersimpan sebagai field controller, bukan langsung di GC.
+            for _, member in pairs(value) do
+                if type(member) == "function" then push(member) end
             end
         end
+        if n % 100 == 0 then task.wait() end
     end
+    Refs.ConnectionCount = n
     return Refs.Inv ~= nil
-end
-
-function getUpvalues(fn)
-    if debug and debug.getupvalues then
-        local ok, ups = pcall(debug.getupvalues, fn)
-        if ok and type(ups) == "table" then return ups end
-    end
-    local out = {}
-    local gu = (debug and debug.getupvalue) or getupvalue
-    if gu then
-        for i = 1, 60 do
-            local ok, v = pcall(gu, fn, i)
-            if not ok then break end
-            out[i] = v
-        end
-    end
-    return out
 end
 
 -- Cek apakah tabel ini daftar drop game
@@ -2216,7 +2271,7 @@ local function findDropRefs(deep)
     if not Drops.list and ev and getconnections then
         local ok, conns = pcall(getconnections, ev.OnClientEvent)
         if ok and type(conns) == "table" then
-            for _, c in ipairs(conns) do
+            for _, c in pairs(conns) do
                 local okf, fn = pcall(function() return c.Function end)
                 if okf and type(fn) == "function" then
                     for _, u in pairs(getUpvalues(fn)) do
@@ -2232,8 +2287,10 @@ local function findDropRefs(deep)
         end
     end
     -- 3) cadangan: cari lewat getgc (hanya kalau diminta: berat)
-    if not Drops.list and deep and getgc then
-        for _, v in pairs(getgc(true)) do
+    if not Drops.list and deep and type(getgc) == "function" then
+        local ok, objects = pcall(getgc, true)
+        if not ok or type(objects) ~= "table" then ok, objects = pcall(getgc) end
+        for _, v in pairs(ok and type(objects) == "table" and objects or {}) do
             if type(v) == "table" then
                 local e = rawget(v, 1)
                 if type(e) == "table" and rawget(e, "uid") ~= nil and rawget(e, "frame") ~= nil
@@ -4599,7 +4656,7 @@ local function findTreeRefs()
     if ev and ev:IsA("RemoteEvent") and getconnections then
         local ok, conns = pcall(getconnections, ev.OnClientEvent)
         if ok and type(conns) == "table" then
-            for _, c in ipairs(conns) do
+            for _, c in pairs(conns) do
                 local okf, fn = pcall(function() return c.Function end)
                 if okf and type(fn) == "function" then
                     for _, u in pairs(getUpvalues(fn)) do
@@ -4795,7 +4852,7 @@ function Auto.findTreesDeep()
             if ev:IsA("RemoteEvent") then
                 local ok, conns = pcall(getconnections, ev.OnClientEvent)
                 if ok and type(conns) == "table" then
-                    for _, c in ipairs(conns) do
+                    for _, c in pairs(conns) do
                         local okf, fn = pcall(function() return c.Function end)
                         if okf then addFn(fn) end
                     end
@@ -4806,7 +4863,7 @@ function Auto.findTreesDeep()
             local okS, sig = pcall(function() return RunService[name] end)
             local ok, conns = pcall(getconnections, sig)
             if okS and ok and type(conns) == "table" then
-                for _, c in ipairs(conns) do
+                for _, c in pairs(conns) do
                     local okf, fn = pcall(function() return c.Function end)
                     if okf then addFn(fn) end
                 end
@@ -12678,8 +12735,11 @@ local function reconnect(show)
     if Clear.Running then stopClear("Dihentikan: hubungkan ulang ke game") end
     if Farmer.Running then stopFarmer("Dihentikan: hubungkan ulang ke game") end
     Auto.resetReach()
-    -- Jangan pakai objek world sebelumnya setelah pindah world.
+    -- Jangan pakai objek world atau fungsi dari dunia sebelumnya.
     Refs.World, Refs.Inv = nil, nil
+    Refs.SetTile, Refs.State, Refs.Punch, Refs.Menu = nil, nil, nil, nil
+    Refs.Gems, Refs.Hud, Refs.Others, Refs.Arm = nil, nil, nil, nil
+    Refs.Particles, Anim.Particles = {}, nil
     -- 1) cari isi tas cepat lalu langsung isi dropdown (tidak menunggu scan getgc yang lama)
     if pcall(Anim.quickRefs) and Refs.Inv then
         pcall(doInvRefresh, true)
@@ -12969,7 +13029,30 @@ do
 end
 
 task.spawn(function()
+    local readyDeadline = os.clock() + 12
+    while alive() and LocalPlayer:GetAttribute("GameReady") ~= true and os.clock() < readyDeadline do task.wait(0.25) end
+    if not alive() then return end
     reconnect("n4th v5.2")
+    -- Input dapat tersambung belakangan pada executor yang mulai sebelum client game selesai.
+    if not Refs.Punch then
+        task.spawn(function()
+            for attempt = 1, 5 do
+                task.wait(2)
+                if not alive() or Refs.Punch then return end
+                pcall(Anim.quickRefs)
+                if attempt == 3 and not Refs.Punch then pcall(findRefs) end
+                if Refs.Inv then pcall(watchInventory) end
+                pcall(function() UI.RefInfo:SetDesc(refsText()) end)
+                if Refs.Punch then
+                    print("[n4th] Fungsi pukul ditemukan setelah input game siap.")
+                    return
+                end
+            end
+            if alive() and not Refs.Punch then
+                warn("[n4th] Pukul belum ditemukan setelah mencoba GC dan koneksi input. Jalankan n4th-diagnose.lua untuk laporan API executor.")
+            end
+        end)
+    end
     -- Penjaga dari config dinyalakan setelah data pemain ketemu
     -- (supaya pemain yang sudah ada dicatat dulu)
     if Config.saved("Penjaga", "On") == true and alive() then

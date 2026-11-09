@@ -5,11 +5,37 @@ local httpService = game:GetService("HttpService")
 local lastError = "respons kosong"
 
 local function download(url)
-    local source = game:HttpGet(url)
-    if type(source) ~= "string" or source:match("^%s*$") then error("server mengirim respons kosong", 0) end
-    if source:match("^%s*<") then error("server mengirim HTML, bukan script/metadata", 0) end
-    if source:match("^%s*404:") then error("file GitHub tidak ditemukan (404)", 0) end
-    return source
+    local lastError = "respons kosong"
+    local function checked(source)
+        if type(source) ~= "string" or source:match("^%s*$") then return nil, "respons kosong" end
+        if source:match("^%s*<") then return nil, "server mengirim HTML, bukan script/metadata" end
+        if source:match("^%s*[45]%d%d[:%s]") then return nil, source:sub(1, 120) end
+        return source
+    end
+    local ok, source = pcall(function() return game:HttpGet(url) end)
+    if ok then
+        local valid, reason = checked(source)
+        if valid then return valid end
+        lastError = reason
+    else lastError = tostring(source) end
+    local seen = {}
+    for _, api in ipairs({ request or false, http_request or false, (syn and syn.request) or false, (http and http.request) or false }) do
+        if type(api) == "function" and not seen[api] then
+            seen[api] = true
+            local sent, response = pcall(api, { Url = url, Method = "GET" })
+            if sent and type(response) == "table" then
+                local status = tonumber(response.StatusCode or response.Status)
+                if status and (status < 200 or status >= 300) then
+                    lastError = "HTTP " .. tostring(status)
+                else
+                    local valid, reason = checked(response.Body or response.body)
+                    if valid then return valid end
+                    lastError = reason
+                end
+            else lastError = tostring(response) end
+        end
+    end
+    error("[n4th] Unduh gagal: " .. tostring(lastError), 0)
 end
 
 local function latestSource()
