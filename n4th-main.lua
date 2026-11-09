@@ -5,7 +5,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = nama versi l
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-09-finder-teleport-2"
+Session.Build = "2026-11-09-language-remember-1"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -475,7 +475,7 @@ local PlacedAt = {}   -- kapan tile di-place
 --       1. teks utuh (judul & deskripsi menu) dari daftar EN
 --       2. teks yang berubah-ubah (status, notifikasi) per frasa dari daftar PH
 --   - Menu WindUI dibungkus (I18N.wrap) supaya judul, deskripsi & isi status ikut diterjemahkan.
-local I18N = { Lang = "id", Saved = "id", Ask = true }
+local I18N = { Lang = "id", Saved = "id", Ask = false, Chosen = false }
 
 do (function() -- fungsi sendiri: variabel di dalam tidak ikut batas 200 local
 
@@ -1296,6 +1296,7 @@ do (function() -- fungsi sendiri: variabel di dalam tidak ikut batas 200 local
 
     -- Hapus file config (execute ulang = kembali ke default)
     function Config.reset()
+        if I18N.forget then I18N.forget() end
         Config.Paused = true
         Config.LastJson = nil
         if canFile and type(delfile) == "function" then
@@ -1351,8 +1352,42 @@ Config.add("Pabrik", Pabrik, {
     "SeedId", "WholeWorld", "Tiles", "BreakX", "BreakY",
     "Drop", "Keep", "DropAt", "DropWorld", "DropX", "DropY",
 })
-Config.add("Bahasa", I18N, { "Saved", "Ask" })
-I18N.Lang = (I18N.Saved == "en") and "en" or "id"
+Config.add("Bahasa", I18N, { "Saved", "Ask", "Chosen" })
+do
+    local teleport = game:GetService("TeleportService")
+    local key = "n4th.language.v1"
+    local function valid(lang) return lang == "id" or lang == "en" end
+    local saved = Config.Data.Bahasa
+    if type(saved) == "table" and valid(saved.Saved) and saved.Chosen == nil then
+        -- Config lama memakai Ask=true sebagai default, bukan pilihan khusus pengguna.
+        I18N.Chosen, I18N.Ask = true, false
+    end
+    local ok, preference = pcall(teleport.GetTeleportSetting, teleport, key)
+    if ok and type(preference) == "table" and preference.User == LocalPlayer.UserId
+        and preference.Chosen == true and valid(preference.Saved) then
+        I18N.Saved, I18N.Chosen, I18N.Ask = preference.Saved, true, preference.Ask == true
+    end
+    -- Saat Finder memuat script kembali, dialog tidak boleh menahan kelanjutan antrean.
+    local pendingOK, pending = pcall(teleport.GetTeleportSetting, teleport, "n4th.finder.teleport.v1")
+    I18N.TeleportResume = pendingOK and type(pending) == "table" and pending.Active == true
+        and pending.Schema == 1 and pending.User == LocalPlayer.UserId and pending.Universe == game.GameId
+        and pending.Job ~= game.JobId and type(pending.At) == "number"
+        and os.time() - pending.At >= 0 and os.time() - pending.At < 600
+    if I18N.TeleportResume then
+        if valid(pending.Language) then I18N.Saved = pending.Language end
+        I18N.Chosen = true
+    end
+    I18N.Lang = valid(I18N.Saved) and I18N.Saved or "id"
+    function I18N.remember()
+        pcall(teleport.SetTeleportSetting, teleport, key, {
+            User = LocalPlayer.UserId, Saved = I18N.Saved, Ask = I18N.Ask, Chosen = I18N.Chosen,
+        })
+        if Session.Ready then Config.save(true) else I18N.SavePending = true end
+    end
+    function I18N.forget()
+        pcall(teleport.SetTeleportSetting, teleport, key, false)
+    end
+end
 
 ---------------------------------------------------------------------
 -- STATISTIK SESI & NOTIFIKASI DISCORD (data; tampilan ada di tab Statistik / Discord)
@@ -8696,12 +8731,15 @@ flyButton("▼", 40, function(v) Misc.DownHeld = v end)
 ---------------------------------------------------------------------
 -- Pilih bahasa saat execute (sebelum menu dibuat, karena teks menu dipasang sekali)
 do (function()
-    if not I18N.Ask and Config.saved("Bahasa", "Saved") then return end
+    if I18N.TeleportResume or (I18N.Chosen and not I18N.Ask) then
+        I18N.remember()
+        return
+    end
     local chosen, late = false, false
     local function pick(lang)
+        I18N.Saved, I18N.Chosen = lang, true
+        I18N.remember()
         if late then
-            I18N.Saved = lang
-            Config.save(true)
             notify("Bahasa / Language", "Execute ulang untuk ganti bahasa / Re-execute to apply", 5)
             return
         end
@@ -8724,7 +8762,7 @@ do (function()
     local t0 = os.clock()
     while not chosen and os.clock() - t0 < 30 and alive() do task.wait(0.1) end
     late = not chosen -- tidak dipilih dalam 30 detik: pakai bahasa terakhir
-    if chosen then Config.save(true) end
+    if chosen then I18N.remember() end
 end)() end
 
 Session.InitStep = "membuat menu WindUI"
@@ -11995,6 +12033,7 @@ end
                 Unknown = WorldFinder.Unknown, Failed = WorldFinder.Failed,
                 Results = table.clone(WorldFinder.Results), FoundNames = table.clone(WorldFinder.FoundNames),
                 Logs = table.clone(WorldFinder.Logs), DelaySec = WorldFinder.DelaySec,
+                Language = I18N.Saved,
                 WebhookEach = WorldFinder.WebhookEach,
                 Hook = { On = Hook.On, Url = Hook.Url, Finder = Hook.Finder },
             }
@@ -12720,8 +12759,8 @@ safe(function()
         Callback = function(v)
             local lang = (v == "English") and "en" or "id"
             if lang == I18N.Saved then return end
-            I18N.Saved = lang
-            Config.save(true)
+            I18N.Saved, I18N.Chosen = lang, true
+            I18N.remember()
             notify("Bahasa / Language", "Execute ulang untuk ganti bahasa / Re-execute to apply", 5)
         end,
     })
@@ -12730,9 +12769,9 @@ end)
 safe(function()
     Box.ConnLang:Toggle({
         Title = "Tanya bahasa saat execute",
-        Desc = "Munculkan pilihan bahasa tiap execute",
+        Desc = "Tanya saat execute manual. Tidak muncul saat Finder pindah server.",
         Value = I18N.Ask,
-        Callback = function(on) I18N.Ask = on end,
+        Callback = function(on) I18N.Ask = on I18N.remember() end,
     })
 end)
 
@@ -12938,6 +12977,10 @@ task.spawn(function()
         if not Guard.On then Guard.set(true) end
     end
     Config.start()
+    if I18N.SavePending then
+        I18N.SavePending = nil
+        Config.save(true)
+    end
     -- Finder mendapat prioritas supaya catatan rejoin farming tidak memindahkan world lagi.
     if not WorldFinder.startup(reconnect) then Rejoin.startup(reconnect) end
 end)
