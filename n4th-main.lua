@@ -5,7 +5,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = nama versi l
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-09-module-shapes-1"
+Session.Build = "2026-11-09-module-shapes-2"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -120,7 +120,8 @@ do
                 used[api] = true
                 local ok, objects = pcall(api)
                 if ok and type(objects) == "table" then
-                    for _, object in pairs(objects) do
+                    for key, value in pairs(objects) do
+                        local object = isModule(value) and value or key
                         add(object)
                         if api == getloadedmodules and isModule(object) then loaded[object] = true end
                     end
@@ -210,8 +211,153 @@ do
     end
     local function rememberMatch(target, name, value, object)
         local previous = target[name]
-        if previous and previous.Value ~= value then previous.Ambiguous = true
-        elseif not previous then target[name] = { Value = value, Object = object } end
+        if not previous then
+            target[name] = { Value = value, Object = object, Candidates = { { Value = value, Object = object } } }
+        elseif not rawequal(previous.Value, value) then
+            previous.Ambiguous = true
+            for _, candidate in ipairs(previous.Candidates) do if rawequal(candidate.Value, value) then return end end
+            if #previous.Candidates < 16 then previous.Candidates[#previous.Candidates + 1] = { Value = value, Object = object }
+            else previous.Truncated = true end
+        end
+    end
+    local function definitionEquals(a, b, visited, work, depth)
+        if rawequal(a, b) then return true end
+        if type(a) ~= "table" or type(b) ~= "table" or depth > 12 then return false end
+        local paired = visited[a]
+        if paired and paired[b] then return true end
+        if not paired then paired = {}; visited[a] = paired end
+        paired[b] = true
+        for key, value in pairs(a) do
+            work[1] += 1
+            if work[1] > 200000 or not definitionEquals(value, rawget(b, key), visited, work, depth + 1) then return false end
+        end
+        for key in pairs(b) do if rawget(a, key) == nil then return false end end
+        return true
+    end
+    local function containsDatabase(a, b)
+        local visited, work, checked = {}, { 0 }, 0
+        for id, definition in pairs(b) do
+            if type(id) == "number" and id >= 0 and id % 1 == 0 then
+                if not definitionEquals(rawget(a, id), definition, visited, work, 0) then return false end
+                checked += 1
+                if checked % 512 == 0 then
+                    if not alive() or os.clock() >= moduleDeadline then return false end
+                    task.wait()
+                end
+            end
+        end
+        return true
+    end
+    local function resolveDatabase(match)
+        if match.Truncated then return nil end
+        -- Pilih hanya jika semua definisi kandidat lain tercakup dan identik.
+        -- Salinan tabel dan daftar subset yang koheren tidak dianggap konflik ID.
+        for _, candidate in ipairs(match.Candidates) do
+            local coherent = true
+            for _, other in ipairs(match.Candidates) do
+                if not containsDatabase(candidate.Value, other.Value) then coherent = false break end
+            end
+            if coherent then return candidate end
+        end
+    end
+    local function readUpvalues(fn)
+        for _, api in ipairs({ (debug and debug.getupvalues) or false, getupvalues or false }) do
+            if type(api) == "function" then
+                local ok, values = pcall(api, fn)
+                if ok and type(values) == "table" and next(values) then return values end
+            end
+        end
+        for _, api in ipairs({ (debug and debug.getupvalue) or false, getupvalue or false }) do
+            if type(api) == "function" then
+                local values = {}
+                for index = 1, 80 do
+                    local ok, first, second = pcall(api, fn, index)
+                    if not ok then break end
+                    if second ~= nil then values[index] = second else values[index] = first end
+                end
+                if next(values) then return values end
+            end
+        end
+        return {}
+    end
+    local function actionFunction(fn)
+        if fn == actionFunction then return false end
+        for _, api in ipairs({ (debug and debug.getconstants) or false, getconstants or false }) do
+            if type(api) == "function" then
+                local ok, values = pcall(api, fn)
+                if ok and type(values) == "table" then
+                    local tile, placed, flips, vending, crack = false, false, false, false, false
+                    for _, value in pairs(values) do
+                        if value == "tile" or value == "SetTile" then tile = true
+                        elseif value == "placedAt" then placed = true
+                        elseif value == "flips" then flips = true
+                        elseif value == "newCrack" or value == "HarvestProvider" then crack = true
+                        elseif type(value) == "string" and value:lower():find("empty", 1, true) and value:lower():find("vending", 1, true) then vending = true end
+                    end
+                    if (tile and placed and flips) or (vending and crack) then return true end
+                end
+            end
+        end
+        return false
+    end
+    local bindingTried, boundDatabase = false, nil
+    local function databaseFromActions()
+        if bindingTried then return boundDatabase end
+        bindingTried = true
+        if type(getconnections) ~= "function" then return nil end
+        local queue, seen, results = {}, {}, {}
+        local function push(value)
+            if (type(value) == "function" or type(value) == "table") and not seen[value] then
+                seen[value] = true
+                queue[#queue + 1] = value
+            end
+        end
+        local function inspectAction(fn, depth, visited)
+            if depth > 3 or visited[fn] then return end
+            visited[fn] = true
+            for _, value in pairs(readUpvalues(fn)) do
+                if type(value) == "table" then
+                    local ok, yes = pcall(isItemDatabase, value)
+                    if ok and yes then rememberMatch(results, "ItemDB", value) end
+                elseif type(value) == "function" then inspectAction(value, depth + 1, visited) end
+            end
+        end
+        for _, entry in ipairs({ { RunService, { "RenderStepped", "Heartbeat", "PreRender", "Stepped" } },
+            { UserInputService, { "InputBegan", "InputEnded", "TouchTap" } } }) do
+            for _, name in ipairs(entry[2]) do
+                local ok, signal = pcall(function() return entry[1][name] end)
+                if ok and signal then
+                    local got, connections = pcall(getconnections, signal)
+                    if got and type(connections) == "table" then
+                        for _, connection in pairs(connections) do
+                            local read, fn = pcall(function() return type(connection) == "function" and connection or connection.Function end)
+                            if read then push(fn) end
+                        end
+                    end
+                end
+            end
+        end
+        local index = 1
+        while index <= #queue and index <= 900 and alive() and os.clock() < moduleDeadline do
+            local value = queue[index]
+            index += 1
+            if type(value) == "function" then
+                if actionFunction(value) then inspectAction(value, 0, {}) end
+                for _, upvalue in pairs(readUpvalues(value)) do push(upvalue) end
+            elseif not isItemDatabase(value) then
+                for _, member in pairs(value) do if type(member) == "function" then push(member) end end
+            end
+            if index % 100 == 0 then task.wait() end
+        end
+        local found = results.ItemDB
+        if found then
+            local resolved = not found.Ambiguous and found or resolveDatabase(found)
+            if resolved then
+                boundDatabase = resolved.Value
+                Session.ModuleScan.DatabaseResolution = "upvalue fungsi punch/place pada koneksi game aktif"
+            end
+        end
+        return boundDatabase
     end
     local function inspectValue(target, value, object)
         if type(value) ~= "table" then return end
@@ -220,7 +366,8 @@ do
             if ok and yes then rememberMatch(target, name, value, object) end
         end
     end
-    local function scanRuntime()
+    local function scanRuntime(retry)
+        if runtimeComplete and not retry then return end
         if os.clock() - lastGC < 3 or type(getgc) ~= "function" then return end
         lastGC = os.clock()
         local ok, objects = pcall(getgc, true)
@@ -238,6 +385,7 @@ do
             visited += 1
             if visited % 1000 == 0 then task.wait() end
         end
+        lastGC = os.clock()
     end
     local function clientModule(object)
         -- Jangan membaca export module CoreGui/engine atau menjalankan modul yang belum dimuat.
@@ -275,14 +423,29 @@ do
             end
         end
     end
-    local function structuralModule(name)
+    local function structuralModule(name, retry)
         if not table.find(structuralNames, name) then return nil end
-        scanRuntime()
+        scanRuntime(retry)
         local found = runtimeMatches[name]
         if runtimeComplete and found and not found.Ambiguous then return found.Value, found.Object end
+        if runtimeComplete and found and name == "ItemDB" then
+            local resolved = resolveDatabase(found)
+            if resolved then
+                Session.ModuleScan.DatabaseResolution = "definisi identik/tercakup, kandidat=" .. #found.Candidates
+                return resolved.Value, resolved.Object
+            end
+        end
+        if name == "ItemDB" then
+            local value = databaseFromActions()
+            if value then return value end
+        end
         scanLoaded()
         found = exportMatches[name]
         if exportsComplete and found then
+            if found.Ambiguous and name == "ItemDB" then
+                local resolved = resolveDatabase(found)
+                if resolved then return resolved.Value, resolved.Object end
+            end
             if found.Ambiguous then return nil, nil, "beberapa export cocok dengan bentuk " .. name end
             return found.Value, found.Object
         end
@@ -301,7 +464,7 @@ do
             task.wait(0.1) -- child bernama sama bisa berupa Folder; jangan melakukan busy loop
             refreshIndex()
             object, reason = findModule(parent, name)
-            if not object and not reason then value, shapedObject, reason = structuralModule(name) end
+            if not object and not reason then value, shapedObject, reason = structuralModule(name, true) end
         end
         if value then
             Session.Modules[name] = shapedObject and shapedObject:GetFullName() or "runtime:" .. name
@@ -1673,6 +1836,8 @@ do (function()
 
     -- jenis: "penjaga" | "stop" | "full" | "bonus" | "rejoin" | "report" | "test"
     function Hook.send(kind, text)
+        -- Pengujian lokal tidak mengirim notifikasi ke Discord; config pengguna tetap utuh.
+        if G.__n4thLiveTest and G.__n4thLiveTest.Running then return end
         if not Hook.On or not Hook.valid(Hook.Url) then return end
         local allow = kind == "test" or kind == "report"
             or (kind == "penjaga" and Hook.Penjaga) or (kind == "stop" and Hook.Stop)

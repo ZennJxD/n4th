@@ -64,6 +64,7 @@ if session and type(session.ModuleScan) == "table" then
     local scan = session.ModuleScan
     emit("Module data scan tables=" .. tostring(scan.Tables) .. " exports=" .. tostring(scan.Loaded)
         .. " failed=" .. tostring(scan.Errors) .. " last=" .. tostring(scan.LastError))
+    if scan.DatabaseResolution then emit("Database resolution: " .. tostring(scan.DatabaseResolution)) end
 end
 if session and type(session.Modules) == "table" then
     for name, path in pairs(session.Modules) do emit("Resolved module " .. name .. "=" .. tostring(path)) end
