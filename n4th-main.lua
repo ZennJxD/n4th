@@ -5,10 +5,28 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = nama versi l
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-09-module-shapes-2"
+Session.Build = "2026-11-09-performance-arceus-2"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
+end
+-- Alias executor tetap lokal agar lingkungan game tidak ikut berubah.
+local getgc = getgc or get_gc_objects
+local getmodules = getmodules or get_modules
+local gethui = gethui or get_hidden_gui
+function Session.connectionFunction(connection)
+    if type(connection) == "function" then return connection end
+    local ok, fn = pcall(function() return connection.Function end)
+    if ok and type(fn) == "function" then return fn end
+    if type(getconnectionfunction) == "function" then
+        ok, fn = pcall(getconnectionfunction, connection)
+        if ok and type(fn) == "function" then return fn end
+    end
+end
+function Session.scanStep(budget, visited)
+    if visited % 64 ~= 0 or os.clock() < budget.next then return end
+    task.wait()
+    budget.next = os.clock() + 0.0015
 end
 Session.InitStep = "layanan game"
 function Session.download(url)
@@ -330,7 +348,7 @@ do
                     local got, connections = pcall(getconnections, signal)
                     if got and type(connections) == "table" then
                         for _, connection in pairs(connections) do
-                            local read, fn = pcall(function() return type(connection) == "function" and connection or connection.Function end)
+                            local read, fn = pcall(Session.connectionFunction, connection)
                             if read then push(fn) end
                         end
                     end
@@ -365,6 +383,33 @@ do
             local ok, yes = pcall(matches, name, value)
             if ok and yes then rememberMatch(target, name, value, object) end
         end
+    end
+    local filteredMatches, filteredTried = {}, false
+    local function scanFiltered()
+        if filteredTried then return end
+        filteredTried = true
+        local api = filtergc or filter_gc
+        if type(api) ~= "function" then return end
+        -- Filter native Arceus menghindari menyalin seluruh heap ke tabel Lua.
+        -- Hasil tetap divalidasi dan konflik database tetap diperiksa.
+        local filters = {
+            ItemDB = { 2, 4 }, Inventory = { "new", "add", "remove", "count", "used", "room", "select" },
+            Net = { "call", "on", "worldTag", "CALLS", "EVENTS", "punch" },
+            WorldMenu = { "mount", "isDown", "SKINS", "KEYS", "DEFAULT_SKIN" },
+            Roles = { "isDeveloper", "isModerator", "isUndercover" }, Sfx = { "play", "playAt", "loop" },
+        }
+        for _, name in ipairs(structuralNames) do
+            if not alive() or os.clock() >= moduleDeadline then break end
+            local ok, values = pcall(api, "table", { Keys = filters[name] }, false)
+            if ok and type(values) == "table" then
+                for _, value in pairs(values) do
+                    local valid, yes = pcall(matches, name, value)
+                    if valid and yes then rememberMatch(filteredMatches, name, value) end
+                end
+            else Session.ModuleScan.FilterError = tostring(values):sub(1, 160) end
+            task.wait()
+        end
+        Session.ModuleScan.NativeFiltered = true
     end
     local function scanRuntime(retry)
         if runtimeComplete and not retry then return end
@@ -425,6 +470,17 @@ do
     end
     local function structuralModule(name, retry)
         if not table.find(structuralNames, name) then return nil end
+        scanFiltered()
+        local filtered = filteredMatches[name]
+        if filtered then
+            if not filtered.Ambiguous then return filtered.Value end
+            if name == "ItemDB" then
+                local resolved = resolveDatabase(filtered)
+                if resolved then return resolved.Value end
+                local bound = databaseFromActions()
+                if bound then return bound end
+            end
+        end
         scanRuntime(retry)
         local found = runtimeMatches[name]
         if runtimeComplete and found and not found.Ambiguous then return found.Value, found.Object end
@@ -513,6 +569,21 @@ do
     Session.InitStep = "modul game siap"
 end
 
+-- Metadata item bersifat tetap selama satu sesi. Salin hanya ID yang dipakai;
+-- membaca tabel lintas VM untuk setiap tile jauh lebih mahal daripada cache lokal.
+do
+    local source = ItemDB
+    Session.ItemDBSource = source
+    ItemDB = setmetatable({}, { __index = function(cache, id)
+        local item = source[id]
+        if type(item) ~= "table" then return item end
+        local copy = {}
+        for key, value in pairs(item) do copy[key] = value end
+        rawset(cache, id, copy)
+        return copy
+    end })
+end
+
 Session.InitStep = "WindUI"
 local WindUI
 do
@@ -564,6 +635,7 @@ local State = {
     MultiTarget = 1,              -- jumlah tile dipukul bergantian (1 = biasa)
     SelectedId = nil,
     WorldBreakId = nil,           -- satu jenis block foreground dari world aktif
+    WorldBreakCollect = false,    -- terpisah dari opsi collect Auto Farm / Clear World
     Offsets = {},                 -- tile yang dipilih di Grid
     CalibX = 0,
     CalibY = 0,
@@ -905,6 +977,9 @@ I18N.EN = {
     ["Dipakai juga Clear, Farmer, Splice & Pabrik. Terlalu jauh bisa ditolak server"] =
         "Also used by Clear, Farmer, Splice & Factory. Too far may be rejected by the server",
     ["Buka Grid Tile"] = "Open Tile Grid",
+    ["Ambil drop otomatis"] = "Auto collect drops",
+    ["Khusus Auto Break Block. Mati = tidak mengejar drop; item yang tersentuh tetap bisa terambil oleh game."] =
+        "Auto Break Block only. Off stops chasing drops; the game can still collect items you touch.",
     ["Kotak 5x5, tengah = karakter"] = "5x5 grid, center = character",
     -- Clear
     ["Status Clear"] = "Clear Status",
@@ -1671,18 +1746,45 @@ do (function() -- fungsi sendiri: variabel di dalam tidak ikut batas 200 local
         return out
     end
 
+    local function copy(value, seen)
+        if type(value) ~= "table" then return value end
+        seen = seen or {}
+        if seen[value] then return seen[value] end
+        local result = {}
+        seen[value] = result
+        for key, entry in pairs(value) do result[key] = copy(entry, seen) end
+        return result
+    end
+    local function equal(value, saved, seen)
+        if rawequal(value, saved) then return true end
+        if type(value) ~= "table" or type(saved) ~= "table" then return false end
+        seen = seen or {}
+        if seen[value] == saved then return true end
+        seen[value] = saved
+        for key, entry in pairs(value) do if not equal(entry, saved[key], seen) then return false end end
+        for key in pairs(saved) do if value[key] == nil then return false end end
+        return true
+    end
+
     function Config.save(force)
         if not canFile then
             Config.Status = "Executor tidak bisa simpan file"
             return false
         end
         if Config.Paused and not force then return false end
-        local okJ, json = pcall(HttpService.JSONEncode, HttpService, collect())
+        local current = collect()
+        -- Bandingkan snapshot sebelum encode: config yang diam tidak membuat JSON
+        -- baru tiap tiga detik. Salinan dalam juga mendeteksi edit grid di tempat.
+        if not force and equal(current, Config.LastSnapshot) then return true end
+        local okJ, json = pcall(HttpService.JSONEncode, HttpService, current)
         if not okJ then
             Config.Status = "Gagal membaca pengaturan"
             return false
         end
-        if not force and json == Config.LastJson then return true end
+        if not force and json == Config.LastJson then
+            Config.LastSnapshot = copy(current)
+            return true
+        end
         if type(isfolder) == "function" and type(makefolder) == "function" then
             local okF, has = pcall(isfolder, Config.Folder)
             if okF and not has then pcall(makefolder, Config.Folder) end
@@ -1690,6 +1792,7 @@ do (function() -- fungsi sendiri: variabel di dalam tidak ikut batas 200 local
         local ok = pcall(writefile, Config.Path, json)
         if ok then
             Config.LastJson = json
+            Config.LastSnapshot = copy(current)
             Config.Paused = false
             Config.Status = "Tersimpan " .. os.date("%H:%M:%S")
         else
@@ -1703,6 +1806,7 @@ do (function() -- fungsi sendiri: variabel di dalam tidak ikut batas 200 local
         if I18N.forget then I18N.forget() end
         Config.Paused = true
         Config.LastJson = nil
+        Config.LastSnapshot = nil
         if canFile and type(delfile) == "function" then
             local ok = pcall(delfile, Config.Path)
             Config.Status = ok and "Config dihapus. Execute ulang untuk default" or "Gagal hapus file"
@@ -1713,11 +1817,8 @@ do (function() -- fungsi sendiri: variabel di dalam tidak ikut batas 200 local
     end
 
     function Config.start()
-        -- tandai kondisi sekarang sebagai "sudah tersimpan" kalau sama dengan file
-        if Config.Found then
-            local okJ, json = pcall(HttpService.JSONEncode, HttpService, collect())
-            if okJ then Config.LastJson = json end
-        end
+        -- Gunakan isi file sebagai snapshot, bukan menganggap default baru sudah tersimpan.
+        if Config.Found then Config.LastSnapshot = copy(Config.Data) end
         task.spawn(function()
             while alive() do
                 task.wait(3)
@@ -1731,7 +1832,7 @@ Config.add("Farm", State, {
     "Mode", "PlaceMs", "BreakMs", "AfterBreakMs", "HitsOverride", "SelectedId", "Offsets",
     "CalibX", "CalibY", "AntiAfk", "MutePunch", "Visual", "LiteMode", "AutoCollect", "MultiTarget",
     "CollectAround", "CollectRadius", "CollectMode",
-    "WorldBreakId",
+    "WorldBreakId", "WorldBreakCollect",
 })
 -- Pindahkan nilai default lama. Nilai yang dipilih di versi baru tetap berlaku.
 if (Config.Data.Version == nil or Config.Data.Version == 1) and State.AfterBreakMs == 300 then
@@ -2229,7 +2330,7 @@ end
 
 local function doInvRefresh(force)
     UI.DropErr = nil
-    if Vend.refreshItems and not Vend.Running then pcall(Vend.refreshItems, false) end
+    if Vend.refreshItems and not Vend.Running and UI.VendVisible and UI.VendVisible() then pcall(Vend.refreshItems, false) end
     local ids = placeableIds()
     local sig = table.concat(ids, ",")
     if force or sig ~= lastInvSig then
@@ -2546,7 +2647,7 @@ function Anim.findFast()
             local ok, conns = pcall(getconnections, sig)
             if ok and type(conns) == "table" then
                 for _, c in pairs(conns) do
-                    local okf, fn = pcall(function() return c.Function end)
+                    local okf, fn = pcall(Session.connectionFunction, c)
                     if okf and type(fn) == "function" then
                         for _, u in pairs(getUpvalues(fn)) do
                             if type(u) == "function" and Anim.isArmFn(u) then
@@ -2584,9 +2685,7 @@ function Anim.quickRefs()
                 local ok, conns = pcall(getconnections, sig)
                 if ok and type(conns) == "table" then
                     for _, connection in pairs(conns) do
-                        local okf, fn = pcall(function()
-                            return type(connection) == "function" and connection or connection.Function
-                        end)
+                        local okf, fn = pcall(Session.connectionFunction, connection)
                         if okf then push(fn) end
                     end
                 end
@@ -2602,7 +2701,7 @@ function Anim.quickRefs()
         if Refs.Inv and Refs.World and Refs.Punch and Refs.SetTile and Refs.State and Refs.Menu then break end
         if type(value) == "function" then
             for _, upvalue in pairs(getUpvalues(value)) do push(upvalue) end
-        elseif value ~= ItemDB and value ~= InventoryModule then
+        elseif value ~= ItemDB and value ~= Session.ItemDBSource and value ~= InventoryModule then
             -- Fungsi game kadang tersimpan sebagai field controller, bukan langsung di GC.
             for _, member in pairs(value) do
                 if type(member) == "function" then push(member) end
@@ -2657,7 +2756,7 @@ local function findDropRefs(deep)
         local ok, conns = pcall(getconnections, ev.OnClientEvent)
         if ok and type(conns) == "table" then
             for _, c in pairs(conns) do
-                local okf, fn = pcall(function() return c.Function end)
+                local okf, fn = pcall(Session.connectionFunction, c)
                 if okf and type(fn) == "function" then
                     for _, u in pairs(getUpvalues(fn)) do
                         if not Drops.list and isDropList(u) then
@@ -2805,8 +2904,8 @@ local function inTile(t, x, y)
 end
 
 -- ---------- Collector cepat ----------
--- Cek daftar drop TIAP FRAME. Drop di area langsung diambil, semuanya sekaligus
--- (paralel), jadi tidak antri menunggu balasan server satu per satu.
+-- Periksa drop di worker tunggal dengan anggaran waktu kecil. Pengambilan tetap
+-- paralel, tetapi satu tumpukan besar tidak membuat ribuan task dalam satu frame.
 --   Auto Farm  : drop di tile yang dipilih di Grid
 --   Clear / Farmer : drop di sekitar karakter
 local OffsetParse = {}
@@ -2828,15 +2927,28 @@ end
 -- drop yang terambil di dekat badan (untuk status).
 -- Mode Remote (cara lama): drop di tile grid / di sekitar karakter diambil lewat fungsi ambil-drop game
 function Drops.remoteTick(list, s)
+    if Clear.Running and Clear.TargetId and not State.WorldBreakCollect then return end
     local offs = farmOffsets()
     local farmArea = (State.AutoCollect or State.Override ~= nil) and next(offs) ~= nil
-    local nearArea = (Clear.Running and Clear.Collect) or (Farmer.Running and Farmer.Collect)
+    local nearArea = (Clear.Running and (Clear.TargetId and State.WorldBreakCollect or not Clear.TargetId and Clear.Collect)) or (Farmer.Running and Farmer.Collect)
         or Pabrik.Running or Build.Running or Splice.Roaming
     if not farmArea and not nearArea then return end
     local cx, cy = s.x, s.y - 0.475
     local ptx, pty = getPlayerTile()
     local now = os.clock()
     local R = (State.CollectRadius or 3) + 0.2
+    local world, budget, targets, scheduled = Refs.World, { next = os.clock() + 0.0015 }, {}, 0
+    if farmArea and ptx then
+        for key in pairs(offs) do
+            local o = OffsetParse[key]
+            if not o then
+                local dx, dy = string.match(key, "^(-?%d+),(-?%d+)$")
+                o = { tonumber(dx), tonumber(dy) }
+                OffsetParse[key] = o
+            end
+            if o[1] and o[2] then targets[#targets + 1] = { x = ptx + o[1], y = pty + o[2] } end
+        end
+    end
     local z = Pabrik.Zone -- tempat drop pabrik tidak ikut diambil lagi
     if z and z.world ~= (Refs.World and rawget(Refs.World, "name")) then z = nil end
     for i = #list, 1, -1 do
@@ -2844,27 +2956,33 @@ function Drops.remoteTick(list, s)
         if canTry(d, now) and not (z and math.abs(d.x - z.x) <= 2.5 and math.abs(d.y - z.y) <= 2.5) then
             local hit = nearArea and math.abs(d.x - cx) <= R and math.abs(d.y - cy) <= R
             if not hit and farmArea and ptx then
-                for key in pairs(offs) do
-                    local o = OffsetParse[key]
-                    if not o then
-                        local dx, dy = string.match(key, "^(-?%d+),(-?%d+)$")
-                        o = { tonumber(dx), tonumber(dy) }
-                        OffsetParse[key] = o
-                    end
-                    if o[1] and inTile({ x = ptx + o[1], y = pty + o[2] }, d.x, d.y) then
+                for _, tile in ipairs(targets) do
+                    if inTile(tile, d.x, d.y) then
                         hit = true
                         break
                     end
                 end
             end
-            if hit then task.spawn(takeDrop, d) end
+            if hit then
+                task.spawn(takeDrop, d)
+                scheduled += 1
+                if scheduled >= 8 then break end
+            end
         end
+        Session.scanStep(budget, #list - i + 1)
+        if not alive() or Drops.list ~= list or Refs.World ~= world or AutoDrop.Busy or WorldFinder.Busy
+            or (Clear.Running and Clear.TargetId and not State.WorldBreakCollect) then return end
     end
 end
 
 local function collectTick()
     if AutoDrop.Busy or WorldFinder.Busy then return end
+    if Clear.Running and Clear.TargetId and not State.WorldBreakCollect then
+        Drops.seen = nil
+        return
+    end
     local busy = State.AutoCollect or State.Override ~= nil or (Clear.Running and Clear.Collect)
+        or (Clear.Running and Clear.TargetId and State.WorldBreakCollect)
         or (Farmer.Running and Farmer.Collect) or Pabrik.Running or Build.Running or Splice.Roaming or Vend.Running
     if not busy then return end
     local tnow = os.clock()
@@ -2888,13 +3006,19 @@ local function collectTick()
     end
     local cx, cy = s.x, s.y - 0.475
     local seen = {}
-    for _, d in ipairs(list) do
+    local previous = Drops.seen
+    local membership = previous and next(previous) and {} or nil
+    local world, budget = Refs.World, { next = os.clock() + 0.0015 }
+    for index, d in ipairs(list) do
+        if membership then membership[d] = true end
         if type(d) == "table" and type(d.x) == "number" and math.abs(d.x - cx) <= 1.5 and math.abs(d.y - cy) <= 1.5 then
             seen[d] = d.n or 0
         end
+        Session.scanStep(budget, index)
+        if not alive() or Drops.list ~= list or Refs.World ~= world then Drops.seen = nil return end
     end
-    for d, n in pairs(Drops.seen or {}) do
-        if seen[d] == nil and not table.find(list, d) and d.id and n > 0 then -- hilang di dekat badan = terambil
+    for d, n in pairs(previous or {}) do
+        if seen[d] == nil and not membership[d] and d.id and n > 0 then -- hilang di dekat badan = terambil
             State.Collected += n
             Stats.Items[d.id] = (Stats.Items[d.id] or 0) + n
         end
@@ -2902,9 +3026,16 @@ local function collectTick()
     Drops.seen = seen
 end
 
-table.insert(Connections, RunService.Heartbeat:Connect(function()
-    if alive() then collectTick() end
-end))
+task.spawn(function()
+    while alive() do
+        local ok, err = pcall(collectTick)
+        if not ok and os.clock() - (Drops.LastErrorAt or -10) >= 10 then
+            Drops.LastErrorAt = os.clock()
+            warn("[n4th] Collect: " .. tostring(err))
+        end
+        task.wait(0.05)
+    end
+end)
 
 -- Tunggu sebentar sampai drop di tile ini terambil (supaya tidak tertimpa block baru)
 local function waitTileDrops(t, maxSec)
@@ -4624,17 +4755,28 @@ local function clearCanBreak(id)
     return (it.staffHits and w and w.areas and w.areas.staff) and true or false
 end
 
-function Auto.worldBreakOptions()
+function Auto.worldBreakOptions(background)
     local w, counts, ids = Refs.World, {}, {}
     if not w or type(w.fg) ~= "table" then return ids, counts end
-    local spawn = w.spawn
+    local spawn, grid, eligible = w.spawn, w.fg, {}
+    local budget = { next = os.clock() + 0.0015 }
+    local sx, sy
+    if spawn and (typeof(spawn) == "Vector2" or type(spawn) == "table") then sx, sy = spawn.X, spawn.Y end
     for y = 0, (w.h or 0) - 1 do
-        local row = w.fg[y]
+        local row = grid[y]
         for x = 0, (w.w or 0) - 1 do
             local id = row and row[x]
-            local item = id and ItemDB[id]
-            local atSpawn = spawn and (typeof(spawn) == "Vector2" or type(spawn) == "table") and spawn.X == x and spawn.Y == y
-            if item and item.kind ~= "seed" and not atSpawn and clearCanBreak(id) then counts[id] = (counts[id] or 0) + 1 end
+            if id and id ~= 0 then
+                if eligible[id] == nil then
+                    local item = ItemDB[id]
+                    eligible[id] = item ~= nil and item.kind ~= "seed" and clearCanBreak(id) or false
+                end
+                if eligible[id] and not (sx == x and sy == y) then counts[id] = (counts[id] or 0) + 1 end
+            end
+            if background then
+                Session.scanStep(budget, y * w.w + x + 1)
+                if not alive() or Refs.World ~= w or w.fg ~= grid then return {}, {} end
+            end
         end
     end
     for id in pairs(counts) do ids[#ids + 1] = id end
@@ -4691,17 +4833,16 @@ local function countRemaining()
     if not w then return -1 end
     local W, H = w.w, w.h
     local n, scanned = 0, 0
+    local grid, budget = w.fg, { next = os.clock() + 0.0015 }
     for y = 0, H - 1 do
         local frow, brow = w.fg[y], w.bg[y]
         for x = 0, W - 1 do
             local fid = frow and frow[x] or 0
             local bid = brow and brow[x] or 0
             if (fid ~= 0 or (Clear.IncludeBg and bid ~= 0)) and clearLayerAt(x, y) then n += 1 end
-        end
-        scanned += W
-        if scanned >= 8000 then
-            scanned = 0
-            task.wait()
+            scanned += 1
+            Session.scanStep(budget, scanned)
+            if not alive() or not Clear.Running or Refs.World ~= w or w.fg ~= grid then return -1 end
         end
     end
     return n
@@ -4969,7 +5110,7 @@ local function clearLoop()
         end
 
         -- 2) Ambil drop di sekitar dengan menyusurinya (sentuhan badan), lalu jalan ke bagian berikutnya
-        if Clear.Collect then
+        if (Clear.TargetId and State.WorldBreakCollect) or (not Clear.TargetId and Clear.Collect) then
             local band0 = topRow - 1
             if Move.fetchDrops(function() return Clear.Running end, 5, function(d)
                 return d.y >= band0 and d.y < bottom + 2
@@ -5111,7 +5252,7 @@ local function findTreeRefs()
         local ok, conns = pcall(getconnections, ev.OnClientEvent)
         if ok and type(conns) == "table" then
             for _, c in pairs(conns) do
-                local okf, fn = pcall(function() return c.Function end)
+                local okf, fn = pcall(Session.connectionFunction, c)
                 if okf and type(fn) == "function" then
                     for _, u in pairs(getUpvalues(fn)) do
                         if type(u) == "table" and u ~= Refs.World and rawget(u, "fg") == nil then
@@ -5307,7 +5448,7 @@ function Auto.findTreesDeep()
                 local ok, conns = pcall(getconnections, ev.OnClientEvent)
                 if ok and type(conns) == "table" then
                     for _, c in pairs(conns) do
-                        local okf, fn = pcall(function() return c.Function end)
+                        local okf, fn = pcall(Session.connectionFunction, c)
                         if okf then addFn(fn) end
                     end
                 end
@@ -5318,7 +5459,7 @@ function Auto.findTreesDeep()
             local ok, conns = pcall(getconnections, sig)
             if okS and ok and type(conns) == "table" then
                 for _, c in pairs(conns) do
-                    local okf, fn = pcall(function() return c.Function end)
+                    local okf, fn = pcall(Session.connectionFunction, c)
                     if okf then addFn(fn) end
                 end
             end
@@ -7026,10 +7167,12 @@ function Vend.point()
 end
 
 -- Vending milikmu di world ini: { x, y, fg, id, stock, cap }
-function Vend.machines()
+function Vend.machines(background)
     local w = Refs.World
     local out = {}
-    if not w then return out end
+    if not w or type(w.fg) ~= "table" then return out end
+    local grid, vending = w.fg, {}
+    local budget = { next = os.clock() + 0.0015 }
     local vends = rawget(w, "vends")
     local owner = rawget(w, "vendOwner")
     for y = 0, w.h - 1 do
@@ -7037,8 +7180,11 @@ function Vend.machines()
         if row then
             for x = 0, w.w - 1 do
                 local id = row[x] or 0
-                local it = id ~= 0 and ItemDB[id]
-                if it and it.vend then
+                if vending[id] == nil then
+                    local it = id ~= 0 and ItemDB[id]
+                    vending[id] = it and not not it.vend or false
+                end
+                if vending[id] then
                     local okO, mine = true, true
                     if type(owner) == "function" then okO, mine = pcall(owner, x, y) end
                     if okO and mine then
@@ -7055,6 +7201,10 @@ function Vend.machines()
                             }
                         end
                     end
+                end
+                if background then
+                    Session.scanStep(budget, y * w.w + x + 1)
+                    if not alive() or Refs.World ~= w or w.fg ~= grid then return {} end
                 end
             end
         end
@@ -8924,7 +9074,12 @@ end))
 ---------------------------------------------------------------------
 -- GUI TAMBAHAN: Grid Tile 5x5 + tombol Fly ▲/▼
 ---------------------------------------------------------------------
-local guiParent = (gethui and gethui()) or game:GetService("CoreGui")
+local guiParent
+if type(gethui) == "function" then
+    local ok, parent = pcall(gethui)
+    if ok and typeof(parent) == "Instance" then guiParent = parent end
+end
+guiParent = guiParent or game:GetService("CoreGui")
 
 local function newScreenGui(name)
     local sg = Instance.new("ScreenGui")
@@ -8935,7 +9090,8 @@ local function newScreenGui(name)
     sg.DisplayOrder = 999
     sg.Enabled = false
     if syn and syn.protect_gui then pcall(syn.protect_gui, sg) end
-    sg.Parent = guiParent
+    local ok = pcall(function() sg.Parent = guiParent end)
+    if not ok then sg.Parent = PlayerGui end
     return sg
 end
 
@@ -9430,7 +9586,7 @@ end)
 -- ===== AUTO BREAK BLOCK: jenis block dari foreground world aktif =====
 do (function()
     local controls = box(FarmTab, "Auto Break Block", true)
-    local signature
+    local signature, lastWorld, lastGrid, lastName, lastWidth, lastHeight, refreshedAt
     safe(function() UI.WorldBreakStatus = controls:Paragraph({ Title = "Status Auto Break", Desc = "Pilih block dari world, lalu nyalakan Auto Break Block." }) end)
     safe(function()
         UI.WorldBreakItems = controls:Dropdown({
@@ -9453,7 +9609,17 @@ do (function()
         })
     end)
     function UI.WorldBreakRefresh(force)
-        local ids, counts = Auto.worldBreakOptions()
+        local w = Refs.World
+        local grid, name = w and w.fg, w and w.name
+        local width, height = w and w.w, w and w.h
+        local sameWorld = w == lastWorld and grid == lastGrid and name == lastName and width == lastWidth and height == lastHeight
+        -- Jangan scan dunia pada tab tersembunyi atau selama target break terkunci.
+        if not force and signature and sameWorld then
+            if Clear.Running or Window.Closed or not FarmTab.Selected or os.clock() - (refreshedAt or 0) < 8 then return end
+        end
+        local ids, counts = Auto.worldBreakOptions(true)
+        if Refs.World ~= w or (w and w.fg ~= grid) then return end
+        lastWorld, lastGrid, lastName, lastWidth, lastHeight, refreshedAt = w, grid, name, width, height, os.clock()
         local labels = {}
         for _, id in ipairs(ids) do labels[#labels + 1] = ("%s x%d [%d]"):format(itemName(id), counts[id], id) end
         if #labels == 0 then labels = { "(belum ada block yang bisa dipecah di world ini)" } end
@@ -9473,6 +9639,18 @@ do (function()
     safe(function()
         controls:Button({ Title = "Refresh block world", Desc = "Baca ulang jenis dan jumlah block dari world aktif.",
             Callback = function() UI.later("worldBreakItems", function() UI.WorldBreakRefresh(true) end) end })
+    end)
+    safe(function()
+        UI.WorldBreakCollect = controls:Toggle({
+            Title = "Ambil drop otomatis",
+            Desc = "Khusus Auto Break Block. Mati = tidak mengejar drop; item yang tersentuh tetap bisa terambil oleh game.",
+            Value = State.WorldBreakCollect,
+            Callback = function(on)
+                State.WorldBreakCollect = on
+                Drops.seen = nil
+                if Session.Ready then Config.save(true) end
+            end,
+        })
     end)
     safe(function()
         UI.WorldBreakToggle = controls:Toggle({
@@ -10911,6 +11089,7 @@ do (function() -- fungsi sendiri: variabel di dalam tidak ikut batas 200 local
     local function scanBlocks()
         local w = Refs.World
         if not w or type(w.fg) ~= "table" or type(w.w) ~= "number" then return nil end
+        local grid, budget = w.fg, { next = os.clock() + 0.0015 }
         local fgC, bgC, nf, nb = {}, {}, 0, 0
         local trees = {} -- [seed] = { r = siap, g = tumbuh, nxt = detik ke panen berikutnya }
         local st = workspace:GetServerTimeNow()
@@ -10946,8 +11125,9 @@ do (function() -- fungsi sendiri: variabel di dalam tidak ikut batas 200 local
                     bgC[b] = (bgC[b] or 0) + 1
                     nb += 1
                 end
+                Session.scanStep(budget, y * w.w + x + 1)
+                if not alive() or Refs.World ~= w or w.fg ~= grid then return nil end
             end
-            if y % 64 == 63 then task.wait() end -- world besar: jangan bikin lag
         end
         return fgC, bgC, nf, nb, trees
     end
@@ -11876,6 +12056,7 @@ do (function()
 
     task.spawn(function()
         while alive() do
+            if not Build.Running and (Window.Closed or not LTab.Selected) then task.wait(1) continue end
             local txt
             if Refs.World then
                 local info = Build.Info
@@ -11927,6 +12108,7 @@ end)() end
 -- ===== TAB: VENDING =====
 do (function()
     local VTab = makeTab("Vending", "store", "farm")
+    function UI.VendVisible() return not Window.Closed and VTab.Selected == true end
 
     safe(function()
         UI.VendStatus = VTab:Paragraph({ Title = "Status Vending", Desc = "-" })
@@ -12104,9 +12286,10 @@ do (function()
 
     task.spawn(function()
         while alive() do
+            if not Vend.Running and not UI.VendVisible() then task.wait(1) continue end
             local txt
             if Refs.World then
-                local list = Vend.machines()
+                local list = Vend.machines(true)
                 local total, empty = 0, 0
                 for _, m in ipairs(list) do
                     if m.id and m.stock > 0 then total += m.stock else empty += 1 end
