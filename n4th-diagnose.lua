@@ -52,7 +52,35 @@ local function describeFunction(fn)
     end
     return result
 end
-emit("n4th diagnosis v6 | Place=" .. tostring(game.PlaceId) .. " | Version=" .. tostring(game.PlaceVersion))
+emit("n4th diagnosis v7 | Place=" .. tostring(game.PlaceId) .. " | Version=" .. tostring(game.PlaceVersion))
+do
+    local identify = identifyexecutor or getexecutorname
+    if type(identify) == "function" then
+        local ok, name, version = pcall(identify)
+        if ok then emit("Executor=" .. tostring(name) .. " | ExecutorVersion=" .. tostring(version)) end
+    end
+    local actors = getactors or get_actors or (actor and actor.getactors)
+    if type(actors) == "function" then
+        local ok, values = pcall(actors)
+        if ok and type(values) == "table" then local n=0;for _ in pairs(values) do n+=1 end;emit("Actor states=" .. n) end
+    end
+    emit("Native filter=" .. type(filtergc or filter_gc) .. " | actor execution=" .. type(run_on_actor or (actor and actor.run)))
+    local began = game:GetService("UserInputService").InputBegan
+    if type(getconnections) == "function" then
+        local ok, values = pcall(getconnections, began)
+        if ok and type(values) == "table" then
+            local total, readable, foreign=0,0,0
+            for _, connection in pairs(values) do
+                total+=1
+                local got, fn=pcall(function() return connection.Function end)
+                if got and type(fn)=="function" then readable+=1 end
+                local gotForeign, other=pcall(function() return connection.ForeignState end)
+                if gotForeign and other then foreign+=1 end
+            end
+            emit(("Input connections=%d readable=%d foreign=%d"):format(total,readable,foreign))
+        end
+    end
+end
 emit("API getgc=" .. type(getgc) .. " | constants=" .. type(constants) .. " | getconnections=" .. type(getconnections))
 emit("Raw API constants debug=" .. type(debug and debug.getconstants) .. " global=" .. type(getconstants)
     .. " | upvalues debug=" .. type(debug and debug.getupvalues) .. " global=" .. type(getupvalues))
