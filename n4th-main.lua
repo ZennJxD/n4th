@@ -5,7 +5,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = nama versi l
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-09-performance-arceus-2"
+Session.Build = "2026-11-09-inventory-ui-budget-1"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -888,7 +888,13 @@ local Drops = { list = nil, update = nil, brokeAt = {} }
 local Anim = { fn = nil, idx = nil, set = nil }
 local DropFailUntil = {}   -- drop yang ditolak, dicoba lagi nanti
 
-local UI = {}
+local UI = { Tabs = {}, DropdownTabs = {}, PendingDropdowns = {} }
+function UI.tabVisible(title)
+    if not UI.Window then return true end
+    if UI.Window.Closed then return false end
+    local tab = title and UI.Tabs[title]
+    return not title or (tab and tab.Selected == true) or false
+end
 
 -- Jalankan fn dengan izin penuh. Hasil: ok, err (seperti pcall)
 function UI.ident()
@@ -924,6 +930,7 @@ function UI.later(key, fn, delay)
 end
 -- Jalankan pekerjaan UI yang sudah waktunya (dipanggil oleh thread INIT, lihat bagian INIT)
 function UI.runJobs()
+    if UI.flushInventory then UI.flushInventory() end
     local now = os.clock()
     local due = {}
     for key, job in pairs(UI.Jobs) do
@@ -2307,6 +2314,8 @@ end
 -- Setelah daftar di-refresh, pilih lagi item yang sedang dipakai (dari config / pilihan lama)
 local function selectSaved(dd, labels, id)
     if not dd or not id then return end
+    local pending = UI.PendingDropdowns[dd]
+    if pending then pending.id = id return end
     local want = "[" .. tostring(id) .. "]"
     for _, label in ipairs(labels) do
         if string.sub(label, -#want) == want then
@@ -2319,6 +2328,11 @@ end
 -- Refresh 1 dropdown; error dicatat (tampil di tab Koneksi)
 function UI.ddRefresh(dd, labels)
     if not dd then return end
+    if not UI.tabVisible(UI.DropdownTabs[dd]) then
+        UI.PendingDropdowns[dd] = { labels = labels }
+        return
+    end
+    UI.PendingDropdowns[dd] = nil
     local ok, err = UI.exec(function() dd:Refresh(labels) end)
     if ok then
         UI.DropOk = os.clock()
@@ -2329,6 +2343,7 @@ function UI.ddRefresh(dd, labels)
 end
 
 local function doInvRefresh(force)
+    if not force and UI.Window and UI.Window.Closed then UI.InvDirty = true return end
     UI.DropErr = nil
     if Vend.refreshItems and not Vend.Running and UI.VendVisible and UI.VendVisible() then pcall(Vend.refreshItems, false) end
     local ids = placeableIds()
@@ -2394,6 +2409,26 @@ local function refreshInvDropdown(force)
         UI.InvForce = false
         if alive() then doInvRefresh(f) end
     end, force and 0 or 0.3)
+end
+
+-- Dropdown tersembunyi tidak perlu dibangun ulang tiap inventori berubah.
+-- Saat tab dibuka, baca data terbaru lalu kerjakan maksimal satu daftar tertunda.
+function UI.flushInventory()
+    if not UI.Window or UI.Window.Closed then return end
+    local tab = UI.Window.CurrentTab
+    if UI.InvDirty or UI.LastInventoryTab ~= tab then
+        UI.InvDirty, UI.LastInventoryTab = false, tab
+        refreshInvDropdown(false)
+    end
+    if invRefreshPending then return end
+    for dd, pending in pairs(UI.PendingDropdowns) do
+        if UI.tabVisible(UI.DropdownTabs[dd]) then
+            UI.PendingDropdowns[dd] = nil
+            UI.ddRefresh(dd, pending.labels)
+            selectSaved(dd, pending.labels, pending.id)
+            break
+        end
+    end
 end
 
 local invConn
@@ -3766,6 +3801,7 @@ local function astar(sx, sy, goals, gx, gy, R, useBlock, route)
     local w = Refs.World
     if not w then return nil, false, {} end
     local W, H = w.w, w.h
+    local grid, worldName = w.fg, w.name
     local WH = W * H
     local dxm, dyLo, dyHi = reachOffsets(R)
     local oC, sC, bC = {}, {}, {}
@@ -3910,8 +3946,17 @@ local function astar(sx, sy, goals, gx, gy, R, useBlock, route)
     hn = heapPush(hf, hi, hn, h(sx, sy), startI)
     local expanded = 0
     local now = os.clock()
+    local nextSlice, popped = now + 0.0015, 0
 
     while hn > 0 do
+        popped += 1
+        -- Biaya satu titik berbeda-beda (collision, lock, dan lompatan).
+        -- Batasi waktu CPU, bukan menunggu 400 titik selesai sekaligus.
+        if popped % 8 == 0 and os.clock() >= nextSlice then
+            task.wait()
+            if not autoOn() or Refs.World ~= w or w.fg ~= grid or w.name ~= worldName then return nil, false, closed end
+            nextSlice = os.clock() + 0.0015
+        end
         local cur
         cur, hn = heapPop(hf, hi, hn)
         if not closed[cur] then
@@ -3922,20 +3967,20 @@ local function astar(sx, sy, goals, gx, gy, R, useBlock, route)
                 local i = cur
                 while i ~= startI do
                     local p = came[i]
-                    table.insert(path, 1, {
+                    path[#path + 1] = {
                         fx = p % W, fy = p // W, x = i % W, y = i // W,
                         kind = kind[i], build = buildOf[i], key = p * WH + i,
-                    })
+                    }
                     i = p
+                end
+                for left = 1, #path // 2 do
+                    local right = #path - left + 1
+                    path[left], path[right] = path[right], path[left]
                 end
                 return path, false, closed
             end
             expanded += 1
             if expanded > MAX_EXPAND then return nil, false, closed end
-            if expanded % 400 == 0 then
-                task.wait()
-                if not autoOn() then return nil, false, closed end
-            end
             local gc = g[cur]
             local cnt = expand(cx, cy)
             for k = 1, cnt do
@@ -3962,6 +4007,8 @@ local function reachableTileSet(closed, W, R)
     local set = {}
     local dxm, dyLo, dyHi = reachOffsets(R)
     local n = 0
+    local w, grid = Refs.World, Refs.World and Refs.World.fg
+    local budget = { next = os.clock() + 0.0015 }
     for i in pairs(closed) do
         local x, y = i % W, i // W
         for dy = dyLo, dyHi do
@@ -3975,7 +4022,8 @@ local function reachableTileSet(closed, W, R)
             end
         end
         n += 1
-        if n % 500 == 0 then task.wait() end
+        Session.scanStep(budget, n * 8)
+        if not autoOn() or Refs.World ~= w or (w and w.fg ~= grid) then return {} end
     end
     return set
 end
@@ -4814,6 +4862,7 @@ local function scanTopRow()
     local w = Refs.World
     local W, H = w.w, w.h
     local now = os.clock()
+    local grid, budget = w.fg, { next = now + 0.0015 }
     for y = 0, H - 1 do
         local frow, brow = w.fg[y], w.bg[y]
         for x = 0, W - 1 do
@@ -4823,6 +4872,8 @@ local function scanTopRow()
                 and not skipped(Clear.Skip, y * W + x, now) then
                 return y
             end
+            Session.scanStep(budget, y * W + x + 1)
+            if not Clear.Running or not alive() or Refs.World ~= w or w.fg ~= grid then return nil end
         end
     end
     return nil
@@ -4877,6 +4928,7 @@ local function bandTargets(top, bottom, dir, filter)
     local W = w.w
     local list = {}
     local now = os.clock()
+    local grid, budget, visited = w.fg, { next = now + 0.0015 }, 0
     for y = top, math.min(bottom, w.h - 1) do
         for x = 0, W - 1 do
             local idx = y * W + x
@@ -4889,6 +4941,9 @@ local function bandTargets(top, bottom, dir, filter)
                     skipTile(Clear.Skip, idx, 300) -- tidak ada izin
                 end
             end
+            visited += 1
+            Session.scanStep(budget, visited * 8)
+            if not Clear.Running or not alive() or Refs.World ~= w or w.fg ~= grid then return {} end
         end
     end
     table.sort(list, function(a, b)
@@ -5076,6 +5131,8 @@ local function clearLoop()
         releaseInput()
 
         local topRow = scanTopRow()
+        if not Clear.Running or not alive() then break end
+        if Refs.World ~= w then continue end
         if not topRow then
             local remaining = countRemaining()
             Clear.Remaining = remaining
@@ -9444,6 +9501,7 @@ local Window = I18N.wrap(WindUI:CreateWindow({
     SideBarWidth = 150,
     ToggleKey = Enum.KeyCode.Insert,  -- PC: tekan Insert untuk buka/tutup menu
 }))
+UI.Window = Window
 -- Tombol minimize muncul di mobile DAN PC (OnlyMobile=false), bisa digeser.
 -- Cadangan PC: kalau tombol susah dicari, tekan Insert.
 pcall(function()
@@ -9478,8 +9536,9 @@ end
 local function makeTab(title, icon, group)
     local parent = (group and Groups[group]) or Window
     local ok, tab = pcall(function() return parent:Tab({ Title = title, Icon = icon }) end)
-    if ok and tab then return tab end
-    return Window:Tab({ Title = title })
+    if not ok or not tab then tab = Window:Tab({ Title = title }) end
+    UI.Tabs[title] = tab
+    return tab
 end
 
 -- Kotak di dalam tab yang bisa dibuka / ditutup (supaya tab tidak terlihat penuh).
@@ -9732,6 +9791,7 @@ do (function()
     local lastSig
     UI.AutoDropRefresh = function(force)
         if not UI.AutoDropItems then return end
+        if not force and not UI.tabVisible("Auto Drop") then return end
         local labels, picked = AutoDrop.labels()
         local signature = table.concat(labels, "|") .. "/" .. table.concat(picked, "|")
         if not force and signature == lastSig then return end
@@ -11618,6 +11678,7 @@ do (function()
     -- dipanggil saat inventori berubah
     local lastSig = nil
     UI.TrashRefresh = function(force)
+        if not force and not UI.tabVisible("Tas") then return end
         local labels, picked = Bag.labels()
         local sig = table.concat(labels, "|")
         if not force and sig == lastSig then return end
@@ -11880,6 +11941,7 @@ do (function()
     -- dipanggil saat inventori berubah
     local lastSig = nil
     UI.SpliceRefresh = function(force)
+        if not force and not UI.tabVisible("Splice") then return end
         local labels = seedLabels()
         local sig = table.concat(labels, "|")
         if not force and sig == lastSig then return end
@@ -13727,6 +13789,10 @@ end)() end
 ---------------------------------------------------------------------
 -- INIT
 ---------------------------------------------------------------------
+for field, title in pairs({ InvDropdown = "Farm", SeedDropdown = "Farmer", PabrikSeedDropdown = "Pabrik",
+    ClearBlockDropdown = "Clear World", FarmerBlockDropdown = "Farmer", BuildBlockDropdown = "Lahan" }) do
+    if UI[field] then UI.DropdownTabs[UI[field]] = title end
+end
 -- Thread pekerjaan UI: dibuat di sini (sama seperti thread status yang terbukti bisa mengubah UI).
 -- Callback tombol / event game di sebagian executor tidak punya izin mengubah dropdown.
 do
