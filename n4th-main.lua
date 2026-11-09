@@ -5,7 +5,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = nama versi l
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-09-auto-drop-1"
+Session.Build = "2026-11-09-world-finder-1"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -317,6 +317,23 @@ local AutoDrop = {
     Zones = {},
 }
 
+local WorldFinder = {
+    Running = false,
+    Busy = false,
+    Cancelled = false,
+    Mode = "Campuran",
+    Custom = "",
+    Manual = "",
+    Limit = 100,
+    DelaySec = 8,
+    StopOnFound = true,
+    WebhookEach = false,
+    Checked = 0, Found = 0, Locked = 0, Unknown = 0, Failed = 0,
+    Status = "Mati",
+    Results = {},
+    FoundNames = {},
+}
+
 local Guard = {
     On = false,
     Who = "Staff (Mod/Dev)",   -- "Staff (Mod/Dev)" | "Semua pemain"
@@ -546,6 +563,25 @@ I18N.EN = {
     ["Arah drop"] = "Drop direction", ["Kiri"] = "Left", ["Kanan"] = "Right",
     ["Pakai tile tempat berdiri sekarang"] = "Use current standing tile",
     ["Selesai"] = "Done",
+    ["Warp manual"] = "Manual warp", ["Hunting world"] = "World hunting",
+    ["Nama world atau /warp"] = "World name or /warp", ["Warp & cek lock"] = "Warp & check locks",
+    ["Pindah ke nama yang diisi lalu periksa lock world"] = "Travel to the entered world and inspect its locks",
+    ["Cek world sekarang"] = "Check current world", ["Sumber nama"] = "Name source",
+    ["Campuran"] = "Mixed", ["3 Huruf"] = "3 letters", ["4 Huruf"] = "4 letters",
+    ["Kata Indonesia"] = "Indonesian words", ["Daftar sendiri"] = "Custom list",
+    ["Daftar nama sendiri"] = "Custom world names",
+    ["Pisahkan dengan koma atau spasi. Dipakai mode Daftar sendiri dan Campuran."] =
+        "Separate with commas or spaces. Used by Custom list and Mixed modes.",
+    ["Maksimal world per hunting"] = "Worlds per search", ["Jeda antar world (detik)"] = "Delay between worlds (seconds)",
+    ["Berhenti saat ketemu"] = "Stop when found", ["Tetap di world tanpa lock yang ditemukan"] = "Stay in the unlocked world that was found",
+    ["Jalankan World Finder"] = "Run World Finder", ["Hentikan hunting"] = "Stop hunting",
+    ["Menghentikan farming selama hunting. Cek WL, Small Lock, Big Lock, Huge Lock, dan lock lainnya."] =
+        "Stops farming while hunting. Checks WL, Small Lock, Big Lock, Huge Lock, and other locks.",
+    ["URL Webhook Discord"] = "Discord webhook URL", ["Memakai URL yang sama dengan tab Discord"] = "Uses the same URL as the Discord tab",
+    ["Notifikasi World Finder"] = "World Finder notifications",
+    ["Kirim world tanpa lock dan ringkasan hasil hunting"] = "Send unlocked worlds and search summaries",
+    ["Notif setiap world"] = "Notify for every world", ["Sertakan hasil terkunci, belum pasti, dan gagal masuk"] = "Include locked, unknown, and failed results",
+    ["Tes webhook World Finder"] = "Test World Finder webhook",
     ["Seed sudah banyak: jeda, drop ke titik drop (tab Titik Drop), balik ke posisi farm"] =
         "Too many seeds: pause, drop at the drop point (Drop Point tab), return to farm position",
     ["Seed dari block yang dipilih"] = "Seeds of the selected block",
@@ -1292,6 +1328,7 @@ Config.add("Lahan", Land, { "X0", "X1", "Y0" })
 Config.add("Bangun", Build, { "BlockId", "ThenPabrik", "BreakX", "BreakY", "Tiles" })
 Config.add("Vending", Vend, { "Mode", "Point", "Items", "DropX", "DropY" })
 Config.add("AutoDrop", AutoDrop, { "Items", "World", "X", "Y", "Facing" })
+Config.add("WorldFinder", WorldFinder, { "Mode", "Custom", "Manual", "Limit", "DelaySec", "StopOnFound", "WebhookEach" })
 Config.add("Pabrik", Pabrik, {
     "SeedId", "WholeWorld", "Tiles", "BreakX", "BreakY",
     "Drop", "Keep", "DropAt", "DropWorld", "DropX", "DropY",
@@ -1316,6 +1353,7 @@ local Hook = {
     Bonus = true,     -- quest diklaim / redeem berhasil
     Rejoin = true,    -- terlempar / masuk lagi
     Pabrik = true,    -- pabrik drop / lahan selesai / berhenti
+    Finder = true,
     ReportMin = 0,    -- laporan statistik tiap X menit (0 = mati)
     Queue = {},
     LastFull = {},
@@ -1345,6 +1383,7 @@ do (function()
             or (kind == "penjaga" and Hook.Penjaga) or (kind == "stop" and Hook.Stop)
             or (kind == "full" and Hook.Full) or (kind == "bonus" and Hook.Bonus)
             or (kind == "rejoin" and Hook.Rejoin) or (kind == "pabrik" and Hook.Pabrik)
+            or (kind == "finder" and Hook.Finder)
         if not allow or #Hook.Queue >= 20 then return end
         table.insert(Hook.Queue, I18N.T(tostring(text)))
     end
@@ -2329,7 +2368,7 @@ function Drops.remoteTick(list, s)
 end
 
 local function collectTick()
-    if AutoDrop.Busy then return end
+    if AutoDrop.Busy or WorldFinder.Busy then return end
     local busy = State.AutoCollect or State.Override ~= nil or (Clear.Running and Clear.Collect)
         or (Farmer.Running and Farmer.Collect) or Pabrik.Running or Build.Running or Splice.Roaming or Vend.Running
     if not busy then return end
@@ -2789,6 +2828,7 @@ local stopClear, stopFarmer
 
 local function startFarm()
     if State.Running then return end
+    if WorldFinder.Busy then notify("World Finder", "Hentikan hunting sebelum menjalankan farming", 3) return end
     if AutoDrop.Busy then notify("Auto Drop", "Tunggu perjalanan drop selesai", 3) return end
     local err = validate()
     if err then
@@ -4442,6 +4482,7 @@ end
 
 local function startClear()
     if Clear.Running then return end
+    if WorldFinder.Busy then notify("World Finder", "Hentikan hunting sebelum menjalankan farming", 3) return end
     if AutoDrop.Busy then notify("Auto Drop", "Tunggu perjalanan drop selesai", 3) return end
     local err = checkAutoStart()
     if err then
@@ -5156,6 +5197,7 @@ end
 
 local function startFarmer()
     if Farmer.Running then return end
+    if WorldFinder.Busy then notify("World Finder", "Hentikan hunting sebelum menjalankan farming", 3) return end
     if AutoDrop.Busy then notify("Auto Drop", "Tunggu perjalanan drop selesai", 3) return end
     local err = checkAutoStart()
     if not err and not Farmer.Harvest and not Farmer.Plant then
@@ -6020,7 +6062,7 @@ do
     task.spawn(function()
         while alive() do
             task.wait(0.5)
-            if Session.Ready and AutoDrop.On and not AutoDrop.Busy and Guard.Mode == "idle"
+            if Session.Ready and AutoDrop.On and not AutoDrop.Busy and not WorldFinder.Busy and Guard.Mode == "idle"
                 and not State.DropPause and not Pabrik.Traveling and not Move.Homing
                 and os.clock() >= (AutoDrop.NextTry or 0) then
                 local ok, err = pcall(function()
@@ -6246,6 +6288,7 @@ end
 
 function Pabrik.start()
     if Pabrik.Running then return end
+    if WorldFinder.Busy then notify("World Finder", "Hentikan hunting sebelum menjalankan farming", 3) return end
     if AutoDrop.Busy then notify("Auto Drop", "Tunggu perjalanan drop selesai", 3) return end
     local err
     local block = blockOfSeed(Pabrik.SeedId)
@@ -6943,6 +6986,7 @@ end
 
 function Vend.start()
     if Vend.Running then return end
+    if WorldFinder.Busy then notify("World Finder", "Hentikan hunting sebelum menjalankan farming", 3) return end
     if AutoDrop.Busy then notify("Auto Drop", "Tunggu perjalanan drop selesai", 3) return end
     local err
     if not Refs.World then
@@ -7896,6 +7940,7 @@ end
 
 function Build.start()
     if Build.Running then return end
+    if WorldFinder.Busy then notify("World Finder", "Hentikan hunting sebelum menjalankan farming", 3) return end
     if AutoDrop.Busy then notify("Auto Drop", "Tunggu perjalanan drop selesai", 3) return end
     local err
     local it = Build.BlockId and ItemDB[Build.BlockId]
@@ -9330,11 +9375,12 @@ do (function() -- fungsi sendiri: variabel di dalam tidak ikut batas 200 local
 
     local function anyRunning()
         return State.Running or Clear.Running or Farmer.Running or Splice.Running or Spam.On
-            or Pabrik.Running or Build.Running or Vend.Running or AutoDrop.On or AutoDrop.Busy
+            or Pabrik.Running or Build.Running or Vend.Running or AutoDrop.On or AutoDrop.Busy or WorldFinder.Busy
     end
 
     -- Catat aktivitas yang sedang jalan (untuk dilanjutkan nanti)
     local function snapshot()
+        if WorldFinder.Busy and WorldFinder.Saved then return WorldFinder.Saved end
         if AutoDrop.Busy and AutoDrop.Saved then return AutoDrop.Saved end
         local tx, ty = Auto.here()
         return {
@@ -9344,7 +9390,8 @@ do (function() -- fungsi sendiri: variabel di dalam tidak ikut batas 200 local
         }
     end
 
-    local function stopAll(forAutoDrop)
+    local function stopAll(forAutoDrop, forFinder)
+        if WorldFinder.Busy and not forFinder then WorldFinder.Cancelled, WorldFinder.Running = true, false end
         if AutoDrop.Busy and not forAutoDrop then AutoDrop.Cancelled = true end
         Auto.stopWalk()
         if Pabrik.Running then Pabrik.stop() end
@@ -10538,7 +10585,7 @@ do (function()
     end
 
     function Bag.tick()
-        if AutoDrop.Busy then return end
+        if AutoDrop.Busy or WorldFinder.Busy then return end
         if Bag.TrashOn then
             for _, id in ipairs(Bag.TrashList) do
                 local n = invCount(id)
@@ -10785,6 +10832,7 @@ do (function()
 
     function Splice.start()
         if Splice.Running then return end
+        if WorldFinder.Busy then notify("World Finder", "Hentikan hunting sebelum menjalankan farming", 3) return end
         if AutoDrop.Busy then notify("Auto Drop", "Tunggu perjalanan drop selesai", 3) return end
         local err
         if not Refs.World then
@@ -11511,6 +11559,7 @@ do (function()
     task.spawn(function()
         while alive() do
             local now = os.clock()
+            if WorldFinder.Busy then task.wait(1) continue end
             local wn = Guard.worldName and Guard.worldName() or ""
             if wn ~= "" and not Pabrik.Traveling then Rejoin.LastWorld = wn end
             if Guard.anyRunning and Guard.anyRunning() and Guard.Mode == "idle" then
@@ -11535,7 +11584,7 @@ do (function()
 
     -- ===== terlempar dari world =====
     local function onWorldClosed(msg)
-        if not (Rejoin.On and Rejoin.World) or Rejoin.Busy or Pabrik.Traveling then return end
+        if not (Rejoin.On and Rejoin.World) or Rejoin.Busy or Pabrik.Traveling or WorldFinder.Busy then return end
         if Guard.Mode == "away" or Guard.Mode == "out" then return end -- Penjaga yang keluar
         local saved = Rejoin.Last
         if not saved or saved.world == "" or os.clock() - Rejoin.LastAt > 10 then return end
@@ -11660,7 +11709,7 @@ do (function()
             task.wait(2)
             local out = Guard.worldName() == ""
             local free = Rejoin.On and Rejoin.Keep and not Rejoin.Busy and not Rejoin.Leaving and not Pabrik.Traveling
-                and Guard.Mode == "idle"
+                and not WorldFinder.Busy and Guard.Mode == "idle"
             if not (out and free) then
                 outSince = nil
             else
@@ -11761,7 +11810,425 @@ do (function()
 end)() end
 
 Config.add("Reconnect", Rejoin, { "On", "World", "Server", "DelaySec", "ScriptUrl", "Keep", "Target" })
-Config.add("Discord", Hook, { "On", "Url", "Penjaga", "Stop", "Full", "Bonus", "Rejoin", "Pabrik", "ReportMin" })
+Config.add("Discord", Hook, { "On", "Url", "Penjaga", "Stop", "Full", "Bonus", "Rejoin", "Pabrik", "Finder", "ReportMin" })
+
+-- WORLD FINDER: pindah world dan verifikasi seluruh foreground sebelum menyebutnya tanpa lock.
+do
+    local modes = { "Campuran", "3 Huruf", "4 Huruf", "Kata Indonesia", "English Words", "BUY + Item", "Daftar sendiri" }
+    WorldFinder.Modes = modes
+    local wordsID = "API AIR AKU AWAN AYAM BATU BINTANG BIRU BUKU BUMI BUNGA CAHAYA CINTA DAUN DEWA EMAS GARAM GULA GUNUNG HATI HUJAN IKAN INDAH JALAN KAYU KOPI KOTA KUCING LANGIT LAUT MADU MALAM MATA MIMPI NAGA NASI OMBAK PAGI PASIR PELANGI PINTU POHON PULAU RAJA RATU RUMAH SABUN SATU SAYUR SENJA SUSU TANAH TIGA TIMUR UANG UJIAN ULAR UTARA WARNA WAKTU"
+    local wordsEN = "AIR APPLE ASH AURA BEACH BIRD BLUE BOOK BREAD BRICK CANDY CLOUD COIN CORAL CROWN DAWN DOOR DREAM DUSK EARTH EAST FIRE FISH FLAME FLOWER FOREST FROST GAME GARDEN GEM GLASS GOLD GREEN HOME HONEY ICE ISLAND JADE KING LAKE LEAF LIGHT LION LOVE LUCK MAGIC MAPLE MILK MINT MOON NIGHT NORTH OCEAN PEARL PINK PLANT RAIN RED RIVER ROSE SAND SEED SILK SKY SNOW SOUL STAR STONE SUN TREE WATER WEST WIND WOLF WOOD"
+    local buyWords = "SEED SEEDS BLOCK BLOCKS FARM DIRT STONE WOOD LAVA DOOR LOCK WL DL BGL GEMS WATER SAND GLASS FLOWER TREE APPLE GRASS ROCK BRICK PLATFORM PICKAXE WINGS FIST RAYMAN CLOTHES HAT SHIRT PANTS SHOES HAND"
+
+    function WorldFinder.name(raw)
+        local name = tostring(raw or ""):gsub("^%s+", ""):gsub("%s+$", "")
+        name = name:gsub("^/[Ww][Aa][Rr][Pp]%s+", ""):upper()
+        if name == "" or not name:match("^[A-Z0-9]+$") then return nil end
+        return name
+    end
+
+    local function words(text, prefix)
+        local out = {}
+        for name in text:upper():gmatch("[A-Z0-9]+") do out[#out + 1] = (prefix or "") .. name end
+        return out
+    end
+
+    local function shortNames(length, count)
+        local out, space = {}, 26 ^ length
+        local start = math.random(0, space - 1)
+        for index = 0, math.min(count, space) - 1 do
+            local value, chars = (start + index * 137) % space, {}
+            for pos = length, 1, -1 do
+                chars[pos] = string.char(65 + value % 26)
+                value = math.floor(value / 26)
+            end
+            out[#out + 1] = table.concat(chars)
+        end
+        return out
+    end
+
+    function WorldFinder.candidates(mode, limit, custom)
+        limit = math.clamp(math.floor(tonumber(limit) or 100), 1, 500)
+        local customNames = {}
+        local cleaned = tostring(custom or ""):gsub("/[Ww][Aa][Rr][Pp]%s+", "")
+        for entry in cleaned:gmatch("[^%s,;]+") do
+            local name = WorldFinder.name(entry)
+            if name then customNames[#customNames + 1] = name end
+        end
+        local pools = {
+            ["3 Huruf"] = shortNames(3, limit), ["4 Huruf"] = shortNames(4, limit),
+            ["Kata Indonesia"] = words(wordsID), ["English Words"] = words(wordsEN),
+            ["BUY + Item"] = words(buyWords, "BUY"), ["Daftar sendiri"] = customNames,
+        }
+        local selected = mode == "Campuran"
+            and { pools["3 Huruf"], pools["4 Huruf"], pools["Kata Indonesia"], pools["English Words"], pools["BUY + Item"], customNames }
+            or { pools[mode] or {} }
+        local out, seen, index = {}, {}, 1
+        while #out < limit do
+            local hasEntry = false
+            for _, pool in ipairs(selected) do
+                local name = pool[index]
+                if name then
+                    hasEntry = true
+                    if not seen[name] then out[#out + 1], seen[name] = name, true end
+                end
+                if #out >= limit then break end
+            end
+            if not hasEntry then break end
+            index += 1
+        end
+        return out
+    end
+
+    local function metadataLock(lock)
+        if lock == nil or lock == false or lock == "" or lock == "0" or (type(lock) == "number" and lock <= 0) then return false, false end
+        if type(lock) ~= "table" then return true, false end
+        local owners = { owner = true, ownerId = true, ownerID = true, userId = true, uid = true }
+        local flags = { locked = true, isLocked = true, claimed = true }
+        local unknown = false
+        for key, value in pairs(lock) do
+            if owners[key] then
+                if type(value) == "number" and value > 0 then return true, false end
+                if type(value) == "string" and value ~= "" and value ~= "0" then return true, false end
+                if type(value) ~= "number" and value ~= false and value ~= "" and value ~= "0" then unknown = true end
+            elseif flags[key] and value == true then
+                return true, false
+            elseif value ~= false and value ~= 0 and value ~= "" and type(value) ~= "function"
+                and not (type(value) == "table" and next(value) == nil) then
+                unknown = true
+            end
+        end
+        return false, unknown
+    end
+
+    function WorldFinder.inspect(w, expected)
+        local result = { kind = "unknown", detail = "Data world belum lengkap" }
+        if type(w) ~= "table" or rawget(w, "name") ~= expected then return result end
+        local width, height, grid = rawget(w, "w"), rawget(w, "h"), rawget(w, "fg")
+        if type(width) ~= "number" or type(height) ~= "number" or width <= 0 or height <= 0
+            or width % 1 ~= 0 or height % 1 ~= 0 or type(grid) ~= "table" then return result end
+        local lockCounts, missing, nonzero, checksum = {}, false, 0, 0
+        local lockNames = { worldlock = true, smalllock = true, biglock = true, hugelock = true }
+        for y = 0, height - 1 do
+            local row = grid[y]
+            if type(row) ~= "table" then
+                missing = true
+            else
+                for x = 0, width - 1 do
+                    local id = row[x] or 0
+                    if type(id) ~= "number" then
+                        missing = true
+                    elseif id ~= 0 then
+                        nonzero += 1
+                        checksum = (checksum + id * (1 + y * width + x)) % 2147483647
+                        local item = ItemDB[id]
+                        if type(item) ~= "table" then
+                            missing = true
+                        else
+                            local name = tostring(item.name or ("Item " .. id))
+                            if item.lock or item.area or item.guildLock or lockNames[name:lower():gsub("[^a-z]", "")] then
+                                lockCounts[name] = (lockCounts[name] or 0) + 1
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        local labels = {}
+        for name, count in pairs(lockCounts) do labels[#labels + 1] = name .. " x" .. count end
+        table.sort(labels)
+        local hasOwner, unknownMetadata = metadataLock(rawget(w, "lock"))
+        if #labels > 0 or hasOwner then
+            result.kind, result.detail = "locked", #labels > 0 and table.concat(labels, ", ") or "World lock terdeteksi dari metadata pemilik"
+        elseif not missing and not unknownMetadata and nonzero > 0 then
+            result.kind, result.detail = "unlocked", "Tidak ada world lock atau area lock pada foreground dan metadata world"
+        elseif unknownMetadata then
+            result.detail = "Format metadata lock belum dikenali"
+        end
+        result.fingerprint = result.kind .. ":" .. result.detail .. ":" .. nonzero .. ":" .. checksum
+        return result
+    end
+
+    local function waitFor(seconds, live)
+        local untilTime = os.clock() + seconds
+        while live() and os.clock() < untilTime do task.wait(math.min(0.1, untilTime - os.clock())) end
+        return live()
+    end
+
+    function WorldFinder.warp(name, live)
+        if not live() then return false, "Dihentikan" end
+        if Guard.worldName() == name and Auto.here() then return true end
+        if Guard.worldName() ~= "" then
+            if not Guard.leaveWorld() then return false, "Gagal keluar dari world sekarang" end
+            if not waitFor(2, live) then return false, "Dihentikan" end
+        end
+        if not live() then return false, "Dihentikan" end
+        local ok, reason = Guard.enterWorld(name)
+        if not live() then return false, "Dihentikan" end
+        if not ok then return false, tostring(reason or "World tidak bisa dimasuki") end
+        if not waitFor(1.5, live) then return false, "Dihentikan" end
+        pcall(Guard.afterEnter)
+        return Guard.worldName() == name, "World tujuan belum terbaca"
+    end
+
+    local function inspectLoaded(name, live)
+        local deadline, previous, previousGrid = os.clock() + 6, nil, nil
+        local result = { kind = "unknown", detail = "Data world belum lengkap" }
+        while live() and os.clock() < deadline do
+            local w = Refs.World
+            result = WorldFinder.inspect(w, name)
+            if Auto.here() and result.kind ~= "unknown" and previous == result.fingerprint and previousGrid == w.fg then return result end
+            previous, previousGrid = result.fingerprint, w and w.fg
+            if not waitFor(0.4, live) then break end
+        end
+        if result.kind ~= "unknown" then return { kind = "unknown", detail = "Data world belum stabil" } end
+        return result
+    end
+
+    function WorldFinder.record(name, result)
+        WorldFinder.Checked += 1
+        local labels = { unlocked = "TANPA LOCK", locked = "TERKUNCI", unknown = "BELUM PASTI", failed = "GAGAL MASUK" }
+        if result.kind == "unlocked" then
+            WorldFinder.Found += 1
+            WorldFinder.FoundNames[#WorldFinder.FoundNames + 1] = name
+        elseif result.kind == "locked" then WorldFinder.Locked += 1
+        elseif result.kind == "failed" then WorldFinder.Failed += 1
+        else WorldFinder.Unknown += 1 end
+        local message = name .. " | " .. (labels[result.kind] or labels.unknown) .. " | " .. result.detail
+        WorldFinder.Results[#WorldFinder.Results + 1] = message
+        WorldFinder.Status = message
+        if result.kind == "unlocked" or WorldFinder.WebhookEach then Hook.send("finder", ("World Finder\n" .. message):sub(1, 1600)) end
+        if result.kind == "unlocked" then notify("World Finder", message, 10) end
+    end
+
+    function WorldFinder.stop()
+        WorldFinder.Running = false
+        if WorldFinder.Busy then WorldFinder.Status = "Menghentikan hunting setelah perpindahan selesai" end
+    end
+
+    function WorldFinder.start(manual)
+        if WorldFinder.Busy then return end
+        if not Session.Ready or not Refs.World or not Guard.enterWorld then notify("World Finder", "Hubungkan ke game dulu", 4) return end
+        if AutoDrop.Busy or Pabrik.Traveling or Rejoin.Busy or Guard.Mode ~= "idle" then
+            notify("World Finder", "Tunggu perjalanan otomatis selesai", 4)
+            return
+        end
+        local queue
+        if manual then
+            local name = WorldFinder.name(manual)
+            if not name then notify("World Finder", "Nama world memakai huruf A-Z dan angka 0-9", 4) return end
+            queue = { name }
+        else
+            queue = WorldFinder.candidates(WorldFinder.Mode, WorldFinder.Limit, WorldFinder.Custom)
+        end
+        if #queue == 0 then notify("World Finder", "Daftar nama world masih kosong", 4) return end
+        WorldFinder.Saved = Guard.snapshot()
+        WorldFinder.Running, WorldFinder.Busy, WorldFinder.Cancelled = true, true, false
+        WorldFinder.Checked, WorldFinder.Found, WorldFinder.Locked, WorldFinder.Unknown, WorldFinder.Failed = 0, 0, 0, 0, 0
+        WorldFinder.Results, WorldFinder.FoundNames = {}, {}
+        WorldFinder.Total = #queue
+        local token = Guard.Token
+        local function live()
+            return alive() and WorldFinder.Running and not WorldFinder.Cancelled and Guard.Token == token and Guard.Mode == "idle"
+        end
+        local paused, pauseError = pcall(Guard.stopAll, nil, true)
+        if not paused then
+            WorldFinder.Running, WorldFinder.Busy, WorldFinder.Saved = false, false, nil
+            notify("World Finder", "Gagal menghentikan farming: " .. tostring(pauseError), 5)
+            return
+        end
+        Rejoin.Last, Rejoin.LastAt = nil, 0
+        task.spawn(function()
+            local ok, reason = pcall(function()
+                if not waitFor(1.2, live) then return end
+                for index, name in ipairs(queue) do
+                    if not live() then break end
+                    WorldFinder.Status = ("Warp %d/%d: %s"):format(index, #queue, name)
+                    local entered, message = WorldFinder.warp(name, live)
+                    if not live() then break end
+                    local result = entered and inspectLoaded(name, live) or { kind = "failed", detail = message }
+                    if not live() then break end
+                    WorldFinder.record(name, result)
+                    if result.kind == "unlocked" and WorldFinder.StopOnFound then break end
+                    if index < #queue and not waitFor(math.max(5, tonumber(WorldFinder.DelaySec) or 8), live) then break end
+                end
+            end)
+            local finished = live()
+            WorldFinder.Running, WorldFinder.Busy, WorldFinder.Saved = false, false, nil
+            local foundPreview = {}
+            for index = 1, math.min(10, #WorldFinder.FoundNames) do foundPreview[#foundPreview + 1] = WorldFinder.FoundNames[index] end
+            if #WorldFinder.FoundNames > 10 then foundPreview[#foundPreview + 1] = "+" .. (#WorldFinder.FoundNames - 10) .. " lainnya" end
+            local outcome = WorldFinder.Found > 0 and ("Ketemu: " .. table.concat(foundPreview, ", "))
+                or "Tidak ketemu world tanpa lock yang terverifikasi"
+            local summary = ("%s\nDicek %d | Tanpa lock %d | Terkunci %d | Belum pasti %d | Gagal masuk %d"):format(
+                outcome, WorldFinder.Checked, WorldFinder.Found, WorldFinder.Locked, WorldFinder.Unknown, WorldFinder.Failed)
+            if not ok then summary = "Hunting gagal: " .. tostring(reason) .. "\n" .. summary
+            elseif not finished then summary = "Hunting dihentikan\n" .. summary end
+            WorldFinder.Status = summary
+            if alive() then
+                Hook.send("finder", ("World Finder\n" .. summary):sub(1, 1600))
+                notify("World Finder", summary, 8)
+            end
+            if UI.FinderToggle then UI.later("finderOff", function() UI.FinderToggle:Set(false) end) end
+        end)
+    end
+end
+
+-- ===== TAB: WORLD FINDER =====
+do (function()
+    local tab = makeTab("World Finder", "globe", "fitur")
+    safe(function() UI.FinderStatus = tab:Paragraph({ Title = "Status", Desc = WorldFinder.Status }) end)
+    local manualBox = box(tab, "Warp manual", true)
+    local huntBox = box(tab, "Hunting world", true)
+    local webhookBox = box(tab, "Discord World Finder", false)
+
+    safe(function()
+        manualBox:Input({
+            Title = "Nama world atau /warp",
+            Desc = "Contoh: /warp BUYSEED",
+            Value = WorldFinder.Manual,
+            Placeholder = "/warp BUYSEED",
+            Callback = function(value) WorldFinder.Manual = tostring(value or "") end,
+        })
+    end)
+    safe(function()
+        manualBox:Button({
+            Title = "Warp & cek lock",
+            Desc = "Pindah ke nama yang diisi lalu periksa lock world",
+            Callback = function() WorldFinder.start(WorldFinder.Manual) end,
+        })
+    end)
+    safe(function()
+        manualBox:Button({
+            Title = "Cek world sekarang",
+            Callback = function()
+                local name = Guard.worldName()
+                if name == "" then notify("World Finder", "Kamu belum masuk world", 4) return end
+                WorldFinder.start(name)
+            end,
+        })
+    end)
+    safe(function()
+        huntBox:Dropdown({
+            Title = "Sumber nama",
+            Values = WorldFinder.Modes,
+            Value = WorldFinder.Mode,
+            Callback = function(value)
+                if type(value) == "table" then value = value[1] end
+                if table.find(WorldFinder.Modes, value) then WorldFinder.Mode = value end
+            end,
+        })
+    end)
+    safe(function()
+        huntBox:Input({
+            Title = "Daftar nama sendiri",
+            Desc = "Pisahkan dengan koma atau spasi. Dipakai mode Daftar sendiri dan Campuran.",
+            Value = WorldFinder.Custom,
+            Placeholder = "API, SKY, BUYSEED, BUYDIRT",
+            Callback = function(value) WorldFinder.Custom = tostring(value or "") end,
+        })
+    end)
+    addNumber(huntBox, {
+        Title = "Maksimal world per hunting",
+        Min = 1, Max = 500, Step = 1, Default = WorldFinder.Limit,
+        Callback = function(value) WorldFinder.Limit = math.floor(value) end,
+    })
+    addNumber(huntBox, {
+        Title = "Jeda antar world (detik)",
+        Min = 5, Max = 60, Step = 1, Default = WorldFinder.DelaySec,
+        Callback = function(value) WorldFinder.DelaySec = math.floor(value) end,
+    })
+    safe(function()
+        huntBox:Toggle({
+            Title = "Berhenti saat ketemu",
+            Desc = "Tetap di world tanpa lock yang ditemukan",
+            Value = WorldFinder.StopOnFound,
+            Callback = function(on) WorldFinder.StopOnFound = on end,
+        })
+    end)
+    safe(function()
+        UI.FinderToggle = huntBox:Toggle({
+            Title = "Jalankan World Finder",
+            Desc = "Menghentikan farming selama hunting. Cek WL, Small Lock, Big Lock, Huge Lock, dan lock lainnya.",
+            Value = false,
+            Callback = function(on)
+                if on then
+                    WorldFinder.start()
+                    if not WorldFinder.Running then UI.later("finderOff", function() UI.FinderToggle:Set(false) end) end
+                else WorldFinder.stop() end
+            end,
+        })
+    end)
+    safe(function()
+        huntBox:Button({
+            Title = "Hentikan hunting",
+            Callback = WorldFinder.stop,
+        })
+    end)
+    safe(function()
+        webhookBox:Input({
+            Title = "URL Webhook Discord",
+            Desc = "Memakai URL yang sama dengan tab Discord",
+            Value = Hook.Url,
+            Placeholder = "https://discord.com/api/webhooks/...",
+            Callback = function(value)
+                value = tostring(value or ""):gsub("^%s+", ""):gsub("%s+$", "")
+                if value ~= "" and not Hook.valid(value) then notify("World Finder", "URL webhook tidak valid", 4) return end
+                Hook.Url = value
+            end,
+        })
+    end)
+    safe(function()
+        UI.FinderWebhook = webhookBox:Toggle({
+            Title = "Notifikasi World Finder",
+            Desc = "Kirim world tanpa lock dan ringkasan hasil hunting",
+            Value = Hook.On and Hook.Finder,
+            Callback = function(on)
+                if on and not Hook.valid(Hook.Url) then
+                    notify("World Finder", "Isi URL webhook dulu", 4)
+                    UI.later("finderWebhookOff", function() UI.FinderWebhook:Set(false) end)
+                    return
+                end
+                Hook.Finder = on
+                if on then Hook.On = true end
+            end,
+        })
+    end)
+    safe(function()
+        webhookBox:Toggle({
+            Title = "Notif setiap world",
+            Desc = "Sertakan hasil terkunci, belum pasti, dan gagal masuk",
+            Value = WorldFinder.WebhookEach,
+            Callback = function(on) WorldFinder.WebhookEach = on end,
+        })
+    end)
+    safe(function()
+        webhookBox:Button({
+            Title = "Tes webhook World Finder",
+            Callback = function()
+                if not (Hook.On and Hook.Finder and Hook.valid(Hook.Url)) then
+                    notify("World Finder", "Aktifkan notifikasi dan isi URL webhook dulu", 4)
+                    return
+                end
+                Hook.send("finder", "World Finder siap mengirim hasil hunting dari n4th")
+                notify("World Finder", "Pesan tes masuk antrian", 3)
+            end,
+        })
+    end)
+    task.spawn(function()
+        local last
+        while alive() do
+            local recent = {}
+            for index = math.max(1, #WorldFinder.Results - 4), #WorldFinder.Results do recent[#recent + 1] = WorldFinder.Results[index] end
+            local text = WorldFinder.Status .. "\n" .. table.concat(recent, "\n")
+            if text ~= last and UI.FinderStatus then
+                last = text
+                UI.later("finderStatus", function() UI.FinderStatus:SetDesc(text) end)
+            end
+            task.wait(0.5)
+        end
+    end)
+end)() end
 
 -- ===== TAB: TITIK DROP (dipakai Pabrik, Farmer, Auto Farm) =====
 do (function()
@@ -12120,6 +12587,7 @@ do (function()
         { "Bonus", "Quest diklaim / redeem berhasil" },
         { "Rejoin", "Terlempar / disconnect / masuk lagi" },
         { "Pabrik", "Pabrik drop seed / lahan selesai / berhenti" },
+        { "Finder", "World Finder: hasil hunting world" },
     }) do
         safe(function()
             dWhat:Toggle({
@@ -12189,6 +12657,7 @@ end)
 -- CLEANUP (otomatis saat script dijalankan ulang)
 ---------------------------------------------------------------------
 Session.Cleanup = function()
+    WorldFinder.Running, WorldFinder.Cancelled = false, true
     AutoDrop.On, AutoDrop.Cancelled = false, true
     State.Running = false
     Clear.Running = false
