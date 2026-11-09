@@ -5,7 +5,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = nama versi l
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-08-references-3"
+Session.Build = "2026-11-09-break-delay-1"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -155,7 +155,7 @@ local State = {
     Mode = "Place + Break",       -- "Place + Break" | "Break saja" | "Place saja"
     PlaceMs = 250,                -- jeda setelah tiap place
     BreakMs = 220,                -- jeda tiap pukulan (normal 220)
-    AfterBreakMs = 300,           -- jeda setelah block hancur
+    AfterBreakMs = 250,           -- jeda setelah block hancur
     HitsOverride = 0,             -- jumlah pukulan manual (0 = otomatis)
     BreakBackground = true,       -- selalu ikut pecah background (tanpa tombol)
     MultiTarget = 1,              -- jumlah tile dipukul bergantian (1 = biasa)
@@ -1177,7 +1177,7 @@ do (function() -- fungsi sendiri: variabel di dalam tidak ikut batas 200 local
     end
 
     local function collect()
-        local out = { AutoSave = Config.AutoSave, Version = 1 }
+        local out = { AutoSave = Config.AutoSave, Version = 2 }
         for _, e in ipairs(Config.List) do
             local t = {}
             for _, k in ipairs(e.keys) do t[k] = e.tbl[k] end
@@ -1246,6 +1246,10 @@ Config.add("Farm", State, {
     "CalibX", "CalibY", "AntiAfk", "MutePunch", "Visual", "LiteMode", "AutoCollect", "MultiTarget",
     "CollectAround", "CollectRadius", "CollectMode",
 })
+-- Pindahkan nilai default lama. Nilai yang dipilih di versi baru tetap berlaku.
+if (Config.Data.Version == nil or Config.Data.Version == 1) and State.AfterBreakMs == 300 then
+    State.AfterBreakMs = 250
+end
 Config.add("Clear", Clear, { "UseBlock", "ScaffoldId", "Collect", "Sweep" })
 Config.add("Farmer", Farmer, {
     "Harvest", "Plant", "Collect", "UseBlock", "ScaffoldId", "HarvestMs", "PlantMs", "SeedId",
