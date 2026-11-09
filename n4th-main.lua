@@ -5,7 +5,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = nama versi l
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-09-executor-punch-1"
+Session.Build = "2026-11-09-world-block-break-1"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -193,6 +193,7 @@ local State = {
     BreakBackground = true,       -- selalu ikut pecah background (tanpa tombol)
     MultiTarget = 1,              -- jumlah tile dipukul bergantian (1 = biasa)
     SelectedId = nil,
+    WorldBreakId = nil,           -- satu jenis block foreground dari world aktif
     Offsets = {},                 -- tile yang dipilih di Grid
     CalibX = 0,
     CalibY = 0,
@@ -1360,6 +1361,7 @@ Config.add("Farm", State, {
     "Mode", "PlaceMs", "BreakMs", "AfterBreakMs", "HitsOverride", "SelectedId", "Offsets",
     "CalibX", "CalibY", "AntiAfk", "MutePunch", "Visual", "LiteMode", "AutoCollect", "MultiTarget",
     "CollectAround", "CollectRadius", "CollectMode",
+    "WorldBreakId",
 })
 -- Pindahkan nilai default lama. Nilai yang dipilih di versi baru tetap berlaku.
 if (Config.Data.Version == nil or Config.Data.Version == 1) and State.AfterBreakMs == 300 then
@@ -2083,7 +2085,7 @@ end
 
 -- Pukul 1 kali. Hasil: "hit" / "broke" / nil
 -- includeBg = ikut pecah background
-local function tryBreak(x, y, includeBg)
+local function tryBreak(x, y, includeBg, onlyId)
     if includeBg == nil then includeBg = State.BreakBackground end
     local key = x .. "," .. y
     local fg = tileAt("fg", x, y)
@@ -2096,6 +2098,7 @@ local function tryBreak(x, y, includeBg)
         layer, id = "bg", bg
     end
     if not layer or not canBreak(id) then return nil end
+    if onlyId and (layer ~= "fg" or id ~= onlyId) then return nil end
 
     -- tunggu sebentar kalau tile baru di-place
     local t = PlacedAt[key]
@@ -2105,6 +2108,16 @@ local function tryBreak(x, y, includeBg)
         PlacedAt[key] = nil
     end
 
+    if onlyId and (not Clear.Running or Clear.TargetId ~= onlyId or not Refs.Punch
+        or not Refs.World or Refs.World.fg ~= Clear.TargetGrid or Refs.World.name ~= Clear.TargetWorld
+        or tileAt("fg", x, y) ~= onlyId) then return nil end
+    if onlyId then
+        local ray = rawget(Refs.World, "raymanOn")
+        if type(ray) == "function" then
+            local ok, on = pcall(ray)
+            if not ok or on then return nil end
+        end
+    end
     if Refs.Punch then
         local ok, err = pcall(Refs.Punch, x, y, State.MutePunch or nil, nil)
         if not ok then
@@ -3146,7 +3159,7 @@ end
 local function scaffoldId()
     local id, use
     if Clear.Running then
-        id, use = Clear.ScaffoldId, Clear.UseBlock
+        id, use = Clear.ScaffoldId, Clear.UseBlock and not Clear.TargetId
     elseif Farmer.Running then
         id, use = Farmer.ScaffoldId, Farmer.UseBlock
     end -- Bangun Lahan tidak pakai pijakan (jalan di atas baris yang sedang dibangun)
@@ -4239,9 +4252,31 @@ local function clearCanBreak(id)
     return (it.staffHits and w and w.areas and w.areas.staff) and true or false
 end
 
+function Auto.worldBreakOptions()
+    local w, counts, ids = Refs.World, {}, {}
+    if not w or type(w.fg) ~= "table" then return ids, counts end
+    local spawn = w.spawn
+    for y = 0, (w.h or 0) - 1 do
+        local row = w.fg[y]
+        for x = 0, (w.w or 0) - 1 do
+            local id = row and row[x]
+            local item = id and ItemDB[id]
+            local atSpawn = spawn and (typeof(spawn) == "Vector2" or type(spawn) == "table") and spawn.X == x and spawn.Y == y
+            if item and item.kind ~= "seed" and not atSpawn and clearCanBreak(id) then counts[id] = (counts[id] or 0) + 1 end
+        end
+    end
+    for id in pairs(counts) do ids[#ids + 1] = id end
+    table.sort(ids, function(a, b)
+        local an, bn = itemName(a):lower(), itemName(b):lower()
+        return an == bn and a < b or an < bn
+    end)
+    return ids, counts
+end
+
 -- Layer yang dipecah: fg dulu, lalu bg
 local function clearLayerAt(x, y)
     local w = Refs.World
+    if Clear.TargetId and (not w or w.fg ~= Clear.TargetGrid or w.name ~= Clear.TargetWorld) then return nil end
     local sp = w and w.spawn
     if sp ~= nil and (typeof(sp) == "Vector2" or type(sp) == "table") and x == sp.X and y == sp.Y then
         return nil
@@ -4249,10 +4284,11 @@ local function clearLayerAt(x, y)
     local fg = tileAt("fg", x, y)
     if fg == nil then return nil end
     if fg ~= 0 then
+        if Clear.TargetId and fg ~= Clear.TargetId then return nil end
         if clearCanBreak(fg) then return "fg", fg end
         return nil -- fg tidak bisa dipecah, bg juga tidak
     end
-    if Clear.IncludeBg then
+    if Clear.IncludeBg and not Clear.TargetId then
         local bg = tileAt("bg", x, y)
         if bg and bg ~= 0 and clearCanBreak(bg) then return "bg", bg end
     end
@@ -4405,9 +4441,13 @@ local function clearBreakTile(t)
     if not layer then return end
     local hits, maxHits = 0, hitsNeeded(id) * 3 + 6
     while Clear.Running and alive() do
+        if Clear.TargetId and raymanOn() then
+            stopClear("Lepas Rayman's Fist dulu agar block lain tidak ikut terkena.")
+            return
+        end
         layer, id = clearLayerAt(x, y)
         if not layer then return end
-        local r = tryBreak(x, y, Clear.IncludeBg)
+        local r = tryBreak(x, y, not Clear.TargetId and Clear.IncludeBg, Clear.TargetId)
         if r == nil then
             skipTile(Clear.Skip, idx, 60)
             return
@@ -4472,19 +4512,21 @@ end
 
 local lastClearText = nil
 local function updateClearStatus()
-    if not UI.ClearStatus then return end
+    if not UI.ClearStatus and not UI.WorldBreakStatus then return end
     local txt = "Status   : " .. (Clear.Running and "JALAN" or "BERHENTI")
         .. "\nBaris    : " .. (Clear.TopRow >= 0 and (Clear.TopRow .. "-" .. (Clear.TopRow + 1)) or "-")
         .. "  | arah: " .. ((Clear.Dir == -1 and Clear.Sweep == "Zig-zag") and "kanan→kiri" or "kiri→kanan")
         .. "\nDipecah  : " .. Clear.Broken .. "  | collect: " .. State.Collected
         .. "\nSisa     : " .. (Clear.Remaining >= 0 and tostring(Clear.Remaining) or "-")
         .. "  | dilewati: " .. skippedCount(Clear.Skip)
-        .. "\nPijakan  : " .. blockText(Clear.UseBlock, Clear.ScaffoldId) .. "  | dipasang: " .. Move.Placed
+        .. (Clear.TargetId and ("\nTarget   : " .. itemName(Clear.TargetId)) or "")
+        .. "\nPijakan  : " .. blockText(Clear.UseBlock and not Clear.TargetId, Clear.ScaffoldId) .. "  | dipasang: " .. Move.Placed
         .. "\nAksi     : " .. Clear.Status
     if txt == lastClearText then return end
     lastClearText = txt
     task.defer(function()
-        pcall(function() UI.ClearStatus:SetDesc(txt) end)
+        if UI.ClearStatus then pcall(function() UI.ClearStatus:SetDesc(txt) end) end
+        if UI.WorldBreakStatus and Clear.TargetId then pcall(function() UI.WorldBreakStatus:SetDesc(txt) end) end
     end)
 end
 
@@ -4492,6 +4534,10 @@ local function clearLoop()
     local idle, lastUi, lastCount = 0, 0, -10
     while Clear.Running and alive() do
         task.wait()
+        if Clear.TargetId and (not Refs.World or Refs.World.fg ~= Clear.TargetGrid or Refs.World.name ~= Clear.TargetWorld) then
+            stopClear("World berubah. Auto Break Block dihentikan.")
+            return
+        end
         local now = os.clock()
         if now - lastCount > 3 then
             lastCount = now
@@ -4521,7 +4567,7 @@ local function clearLoop()
             local remaining = countRemaining()
             Clear.Remaining = remaining
             if remaining == 0 then
-                stopClear("World sudah bersih!")
+                stopClear(Clear.TargetId and ("Selesai. Semua " .. itemName(Clear.TargetId) .. " yang bisa dipecah sudah habis.") or "World sudah bersih!")
                 return
             end
             idle += 1
@@ -4576,7 +4622,11 @@ local function clearLoop()
 end
 
 local function setClearVisual()
-    if UI.ClearToggle then pcall(function() UI.ClearToggle:Set(Clear.Running) end) end
+    if UI.ClearVisualSync then return end
+    UI.ClearVisualSync = true
+    if UI.ClearToggle then pcall(function() UI.ClearToggle:Set(Clear.Running and not Clear.TargetId) end) end
+    if UI.WorldBreakToggle then pcall(function() UI.WorldBreakToggle:Set(Clear.Running and Clear.TargetId ~= nil) end) end
+    UI.ClearVisualSync = false
 end
 
 stopClear = function(reason)
@@ -4599,8 +4649,8 @@ local function checkAutoStart()
     return nil
 end
 
-local function startClear()
-    if Clear.Running then return end
+local function startClear(targetId)
+    if Clear.Running then setClearVisual() return end
     if WorldFinder.Busy then notify("World Finder", "Hentikan hunting sebelum menjalankan farming", 3) return end
     if AutoDrop.Busy then notify("Auto Drop", "Tunggu perjalanan drop selesai", 3) return end
     local err = checkAutoStart()
@@ -4609,7 +4659,25 @@ local function startClear()
         setClearVisual()
         return
     end
-    if Clear.UseBlock and (not Clear.ScaffoldId or invCount(Clear.ScaffoldId) <= 0) then
+    if targetId ~= nil then
+        if type(targetId) ~= "number" or not clearCanBreak(targetId) or (ItemDB[targetId] and ItemDB[targetId].kind == "seed") then
+            notify("Auto Break Block", "Pilih jenis block dari world dulu", 4)
+            setClearVisual()
+            return
+        end
+        local _, counts = Auto.worldBreakOptions()
+        if not counts[targetId] then
+            notify("Auto Break Block", "Block pilihan tidak ada di world ini. Refresh daftar block.", 4)
+            setClearVisual()
+            return
+        end
+        if raymanOn() then
+            notify("Auto Break Block", "Lepas Rayman's Fist dulu agar block lain tidak ikut terkena.", 5)
+            setClearVisual()
+            return
+        end
+    end
+    if not targetId and Clear.UseBlock and (not Clear.ScaffoldId or invCount(Clear.ScaffoldId) <= 0) then
         notify("Auto Clear", "Block pijakan belum dipilih / habis: jalan tanpa block pijakan", 5)
     end
     if Splice.Running and Splice.stop then Splice.stop("Dihentikan karena Auto Clear dimulai") end
@@ -4626,6 +4694,9 @@ local function startClear()
     Clear.TopRow = -1
     Clear.DirRow, Clear.Dir = nil, nil
     Clear.Status = "Mulai..."
+    Clear.TargetId = targetId
+    Clear.TargetGrid = targetId and Refs.World.fg or nil
+    Clear.TargetWorld = targetId and Refs.World.name or nil
     Clear.Running = true
     autoBegin()
     setClearVisual()
@@ -4640,6 +4711,17 @@ local function startClear()
 end
 
 ---------------------------------------------------------------------
+-- Auto Break memakai penelusuran Clear, dengan target foreground tunggal yang terkunci selama proses.
+function Auto.startWorldBreak()
+    if type(State.WorldBreakId) ~= "number" then
+        notify("Auto Break Block", "Pilih block dari daftar world dulu", 4)
+        setClearVisual()
+        return
+    end
+    startClear(State.WorldBreakId)
+    setClearVisual()
+end
+
 -- FARMER: panen pohon yang siap + tanam seed
 ---------------------------------------------------------------------
 -- Pohon siap kalau: waktu server >= waktu tanam + lama tumbuh (sama dengan game).
@@ -8973,6 +9055,73 @@ safe(function()
     })
 end)
 
+-- ===== AUTO BREAK BLOCK: jenis block dari foreground world aktif =====
+do (function()
+    local controls = box(FarmTab, "Auto Break Block", true)
+    local signature
+    safe(function() UI.WorldBreakStatus = controls:Paragraph({ Title = "Status Auto Break", Desc = "Pilih block dari world, lalu nyalakan Auto Break Block." }) end)
+    safe(function()
+        UI.WorldBreakItems = controls:Dropdown({
+            Title = "Block di world",
+            Desc = "Pilih satu jenis block. Angka x menunjukkan jumlah di world aktif.",
+            Values = { "(memuat block world...)" },
+            Callback = function(value)
+                if UI.WorldBreakRefreshing then return end
+                if type(value) == "table" then value = value[1] end
+                local id = type(value) == "string" and tonumber(value:match("%[(%d+)%]$"))
+                if not id then return end
+                if Clear.Running and Clear.TargetId then
+                    notify("Auto Break Block", "Hentikan Auto Break sebelum mengganti target", 3)
+                    UI.later("worldBreakItems", function() UI.WorldBreakRefresh(true) end)
+                    return
+                end
+                State.WorldBreakId = id
+                if Session.Ready then Config.save(true) end
+            end,
+        })
+    end)
+    function UI.WorldBreakRefresh(force)
+        local ids, counts = Auto.worldBreakOptions()
+        local labels = {}
+        for _, id in ipairs(ids) do labels[#labels + 1] = ("%s x%d [%d]"):format(itemName(id), counts[id], id) end
+        if #labels == 0 then labels = { "(belum ada block yang bisa dipecah di world ini)" } end
+        local current = tostring(Refs.World) .. ":" .. tostring(Refs.World and Refs.World.name) .. ":" .. table.concat(labels, "|")
+        if not force and current == signature then return end
+        local ok, err = UI.exec(function()
+            UI.WorldBreakRefreshing = true
+            local refreshed, message = pcall(function()
+                UI.WorldBreakItems:Refresh(labels)
+                selectSaved(UI.WorldBreakItems, labels, State.WorldBreakId)
+            end)
+            UI.WorldBreakRefreshing = false
+            if not refreshed then error(message, 0) end
+        end)
+        if ok then signature = current else warn("[n4th] Daftar block world: " .. tostring(err)) end
+    end
+    safe(function()
+        controls:Button({ Title = "Refresh block world", Desc = "Baca ulang jenis dan jumlah block dari world aktif.",
+            Callback = function() UI.later("worldBreakItems", function() UI.WorldBreakRefresh(true) end) end })
+    end)
+    safe(function()
+        UI.WorldBreakToggle = controls:Toggle({
+            Title = "Auto Break Block",
+            Desc = "Jalan mencari block pilihan dan pecahkan hanya jenis itu. Target yang tidak terjangkau dilewati.",
+            Value = false,
+            Callback = function(on)
+                if UI.ClearVisualSync then return end
+                if on then Auto.startWorldBreak()
+                elseif Clear.Running and Clear.TargetId then stopClear("Dihentikan: Auto Break Block") end
+            end,
+        })
+    end)
+    task.spawn(function()
+        while alive() do
+            UI.later("worldBreakItems", function() UI.WorldBreakRefresh(false) end)
+            task.wait(3)
+        end
+    end)
+end)() end
+
 -- ===== TAB: AUTO DROP =====
 do (function()
     local tab = makeTab("Auto Drop", "package-open", "farm")
@@ -9127,7 +9276,8 @@ safe(function()
         Desc = "Bersihkan dari baris atas ke bawah",
         Value = false,
         Callback = function(on)
-            if on then Auto.startClear() elseif Clear.Running then stopClear() end
+            if UI.ClearVisualSync then return end
+            if on then Auto.startClear() elseif Clear.Running and not Clear.TargetId then stopClear() end
         end,
     })
 end)
@@ -9599,6 +9749,7 @@ do (function() -- fungsi sendiri: variabel di dalam tidak ikut batas 200 local
         local tx, ty = Auto.here()
         return {
             farm = State.Running and not State.Override, clear = Clear.Running, farmer = Farmer.Running,
+            clearTarget = Clear.TargetId,
             spam = Spam.On, splice = Splice.Running, pabrik = Pabrik.Running, build = Build.Running, vend = Vend.Running,
             world = worldName(), tx = tx, ty = ty,
         }
@@ -9715,7 +9866,7 @@ do (function() -- fungsi sendiri: variabel di dalam tidak ikut batas 200 local
             end
             if active() then startFarm() end
         elseif saved.clear then
-            if active() then Auto.startClear() end
+            if active() then Auto.startClear(saved.clearTarget) end
         elseif saved.farmer then
             if active() then Auto.startFarmer() end
         elseif saved.splice then
@@ -11972,6 +12123,7 @@ do (function()
         if canFile and saved then
             local data = {
                 world = saved.world, farm = saved.farm, clear = saved.clear, farmer = saved.farmer,
+                clearTarget = saved.clearTarget,
                 spam = saved.spam, splice = saved.splice, pabrik = saved.pabrik, build = saved.build,
                 tx = saved.tx, ty = saved.ty, at = os.time(),
             }
