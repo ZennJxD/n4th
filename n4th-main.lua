@@ -5,7 +5,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = nama versi l
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-09-world-block-break-1"
+Session.Build = "2026-11-09-module-discovery-1"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -88,59 +88,126 @@ do
     local function requiredChild(parent, name)
         Session.InitStep = parent:GetFullName() .. "/" .. name
         local child = parent:FindFirstChild(name) or parent:WaitForChild(name, 15)
-        assert(child, "[n4th] Tidak menemukan " .. Session.InitStep
-            .. " setelah 15 detik. Struktur game mungkin berubah setelah update.")
+        assert(child, "[n4th] Tidak menemukan " .. Session.InitStep .. " setelah 15 detik.")
         return child
     end
-
+    PlayerGui = requiredChild(LocalPlayer, "PlayerGui")
+    Shared = ReplicatedStorage:FindFirstChild("Shared") or ReplicatedStorage
+    GameGui = PlayerGui:FindFirstChild("GameGui")
+    Session.Modules = {}
+    local indexed, seen = {}, {}
+    local function isModule(object)
+        local ok, yes = pcall(function() return object:IsA("ModuleScript") end)
+        return ok and yes
+    end
+    local function add(object)
+        if isModule(object) and not seen[object] then
+            seen[object] = true
+            indexed[#indexed + 1] = object
+        end
+    end
+    local function refreshIndex()
+        indexed, seen = {}, {}
+        for _, root in ipairs({ ReplicatedStorage, PlayerGui, LocalPlayer:FindFirstChild("PlayerScripts") or false }) do
+            if root then
+                local ok, descendants = pcall(root.GetDescendants, root)
+                if ok and type(descendants) == "table" then for _, object in pairs(descendants) do add(object) end end
+            end
+        end
+        local used = {}
+        for _, api in ipairs({ getloadedmodules or false, getmodules or false }) do
+            if type(api) == "function" and not used[api] then
+                used[api] = true
+                local ok, objects = pcall(api)
+                if ok and type(objects) == "table" then for _, object in pairs(objects) do add(object) end end
+            end
+        end
+    end
     local function findModule(parent, name)
-        if not parent then return nil end
-        local direct = parent:FindFirstChild(name)
-        if direct and direct:IsA("ModuleScript") then return direct end
+        if parent then
+            local direct = parent:FindFirstChild(name)
+            if isModule(direct) then return direct end
+            local found
+            for _, child in ipairs(parent:GetDescendants()) do
+                if child.Name == name and isModule(child) then
+                    if found then return nil, "lebih dari satu modul bernama " .. name .. " di " .. parent:GetFullName() end
+                    found = child
+                end
+            end
+            if found then return found end
+        end
         local found
-        for _, child in ipairs(parent:GetDescendants()) do
-            if child.Name == name and child:IsA("ModuleScript") then
-                if found then return nil, "lebih dari satu modul bernama " .. name end
-                found = child
+        for _, object in ipairs(indexed) do
+            if object.Name == name then
+                if found then return nil, "lebih dari satu modul bernama " .. name .. " dalam daftar client" end
+                found = object
             end
         end
         return found
     end
-
-    local function loadModule(parent, name, required)
-        Session.InitStep = (parent and parent:GetFullName() or "GUI game") .. "/" .. name
-        local module, reason = findModule(parent, name)
-        if not module and required and not reason then
-            -- Modul yang belum direplikasi diberi waktu terbatas untuk muncul.
-            parent:WaitForChild(name, 15)
-            module, reason = findModule(parent, name)
+    refreshIndex()
+    local function report()
+        local folders, names = {}, {}
+        for _, child in ipairs(ReplicatedStorage:GetChildren()) do
+            folders[#folders + 1] = child.Name .. ":" .. child.ClassName
         end
-        if module then
-            local ok, result = pcall(require, module)
-            if ok and type(result) == "table" then return true, result end
+        for _, object in ipairs(indexed) do names[#names + 1] = object.Name end
+        table.sort(folders)
+        table.sort(names)
+        return ("Place=%s | Version=%s | ReplicatedStorage=%s | Modules=%d [%s] | loadedmodules=%s | getmodules=%s"):format(
+            tostring(game.PlaceId), tostring(game.PlaceVersion), table.concat(folders, ", "):sub(1, 900),
+            #indexed, table.concat(names, ", "):sub(1, 1400), type(getloadedmodules), type(getmodules))
+    end
+    local moduleDeadline = os.clock() + 30
+    local function loadModule(parent, name, required)
+        Session.InitStep = "mencari modul " .. name
+        local object, reason = findModule(parent, name)
+        while not object and not reason and required and alive() and os.clock() < moduleDeadline do
+            -- Satu batas waktu bersama; tidak menunggu folder Shared yang bisa sudah dipindah.
+            if parent then parent:WaitForChild(name, math.min(1, moduleDeadline - os.clock()))
+            else task.wait(0.25) end
+            task.wait(0.1) -- child bernama sama bisa berupa Folder; jangan melakukan busy loop
+            refreshIndex()
+            object, reason = findModule(parent, name)
+        end
+        if object then
+            Session.InitStep = "memuat " .. object:GetFullName()
+            local ok, result = pcall(require, object)
+            if ok and type(result) == "table" then
+                Session.Modules[name] = object:GetFullName()
+                return true, result, object
+            end
             reason = ok and "hasil require bukan tabel" or tostring(result)
         end
-        local message = "[n4th] Modul " .. Session.InitStep .. ": " .. (reason or "tidak ditemukan")
-        if required then error(message, 0) end
+        local message = "[n4th] Modul " .. name .. ": " .. (reason or "tidak ditemukan setelah pencarian 30 detik")
+        if required then
+            Session.BootstrapReport = report()
+            warn("[n4th] Struktur client: " .. Session.BootstrapReport)
+            error(message .. ". Jalankan n4th-diagnose.lua untuk membaca struktur client terbaru.", 0)
+        end
         warn(message .. " (opsional, lanjut memuat menu)")
         return false, nil
     end
-
-    PlayerGui = requiredChild(LocalPlayer, "PlayerGui")
-    Shared = requiredChild(ReplicatedStorage, "Shared")
-    -- Remote versi lama bersifat opsional pada game yang memakai ByteNet.
+    function Session.findModule(name, parent)
+        refreshIndex()
+        return findModule(parent or Shared, name)
+    end
     WorldRemotes = ReplicatedStorage:FindFirstChild("WorldRemotes")
     SetTileRemote = WorldRemotes and WorldRemotes:FindFirstChild("SetTile")
-    local _, itemDB = loadModule(Shared, "ItemDB", true)
+    local _, itemDB, itemModule = loadModule(Shared, "ItemDB", true)
     ItemDB = itemDB
-    local _, inventory = loadModule(Shared, "Inventory", true)
+    -- Modul yang terpisah folder tetap bisa dicari melalui indeks client.
+    Shared = itemModule.Parent or Shared
+    local _, inventory = loadModule(Shared, "Inventory", false)
     InventoryModule = inventory
     NetOk, Net = loadModule(Shared, "Net", false)
-    GameGui = PlayerGui:FindFirstChild("GameGui")
     ParticlesOk, ParticlesModule = loadModule(GameGui, "Particles", false)
-    MenuModOk, MenuModule = loadModule(GameGui, "WorldMenu", false)
+    local menuObject
+    MenuModOk, MenuModule, menuObject = loadModule(GameGui, "WorldMenu", false)
+    if not GameGui and menuObject then GameGui = menuObject.Parent end
     RolesOk, RolesModule = loadModule(Shared, "Roles", false)
     SfxOk, SfxModule = loadModule(Shared, "Sfx", false)
+    Session.InitStep = "modul game siap"
 end
 
 Session.InitStep = "WindUI"
@@ -11115,7 +11182,11 @@ end)() end
 --   3. Server membalas id pohon hasil splice, tile langsung diganti di layar.
 --   Hasil splice diperkirakan dulu pakai modul Splice game; kalau tidak bisa, tidak dijalankan.
 do (function()
-    local okMod, SpliceMod = pcall(require, Shared:FindFirstChild("Splice"))
+    local okMod, SpliceMod = pcall(function()
+        local module = Session.findModule("Splice", Shared)
+        if not module then return nil end
+        return require(module)
+    end)
 
     function Splice.result(a, b)
         if not (okMod and type(SpliceMod) == "table" and type(SpliceMod.result) == "function") then return nil end

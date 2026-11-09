@@ -52,17 +52,54 @@ local function describeFunction(fn)
     end
     return result
 end
-emit("n4th diagnosis v4 | Place=" .. tostring(game.PlaceId) .. " | Version=" .. tostring(game.PlaceVersion))
+emit("n4th diagnosis v5 | Place=" .. tostring(game.PlaceId) .. " | Version=" .. tostring(game.PlaceVersion))
 emit("API getgc=" .. type(getgc) .. " | constants=" .. type(constants) .. " | getconnections=" .. type(getconnections))
 emit("Raw API constants debug=" .. type(debug and debug.getconstants) .. " global=" .. type(getconstants)
     .. " | upvalues debug=" .. type(debug and debug.getupvalues) .. " global=" .. type(getupvalues))
 local globals = (getgenv and getgenv()) or _G
 local session = globals.__n4thOpus
 emit("Session build=" .. tostring(session and session.Build) .. " | ready=" .. tostring(session and session.Ready))
+if session and session.BootstrapReport then emit("Startup structure: " .. session.BootstrapReport) end
+if session and type(session.Modules) == "table" then
+    for name, path in pairs(session.Modules) do emit("Resolved module " .. name .. "=" .. tostring(path)) end
+end
 local player = game:GetService("Players").LocalPlayer
 local playerGui = player and player:FindFirstChild("PlayerGui")
 local gameGui = playerGui and playerGui:FindFirstChild("GameGui")
 emit("GameGui=" .. tostring(gameGui ~= nil) .. " | World GUI=" .. tostring(gameGui and gameGui:FindFirstChild("World") ~= nil))
+do
+    local replicated = game:GetService("ReplicatedStorage")
+    local roots = {}
+    local ok, children = pcall(replicated.GetChildren, replicated)
+    if ok and type(children) == "table" then
+        for _, child in pairs(children) do roots[#roots + 1] = child.Name .. ":" .. child.ClassName end
+        table.sort(roots)
+    end
+    emit("ReplicatedStorage children: " .. table.concat(roots, ", "))
+    local seen, count = {}, 0
+    local function show(object, source)
+        local valid, path = pcall(function()
+            if not object:IsA("ModuleScript") then return nil end
+            return object:GetFullName()
+        end)
+        if valid and path and not seen[object] then
+            seen[object], count = true, count + 1
+            if count <= 140 then emit("CLIENT MODULE [" .. source .. "] " .. path) end
+        end
+    end
+    local valid, descendants = pcall(replicated.GetDescendants, replicated)
+    if valid and type(descendants) == "table" then for _, object in pairs(descendants) do show(object, "tree") end end
+    for _, entry in ipairs({ { "getloadedmodules", getloadedmodules }, { "getmodules", getmodules } }) do
+        emit("Module API " .. entry[1] .. "=" .. type(entry[2]))
+        if type(entry[2]) == "function" then
+            local got, values = pcall(entry[2])
+            if got and type(values) == "table" then
+                for _, object in pairs(values) do show(object, entry[1]) end
+            else emit(entry[1] .. " failed: " .. tostring(values)) end
+        end
+    end
+    emit("Unique client modules=" .. count .. (count > 140 and " (paths limited to 140)" or ""))
+end
 if session and type(session.References) == "table" then
     local refs = session.References
     emit("Session World=" .. type(refs.World) .. " | Inventory=" .. type(refs.Inv) .. " | Hit=" .. type(refs.Punch)
