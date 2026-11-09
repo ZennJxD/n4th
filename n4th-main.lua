@@ -5,7 +5,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = nama versi l
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-09-module-discovery-1"
+Session.Build = "2026-11-09-module-shapes-1"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -95,7 +95,7 @@ do
     Shared = ReplicatedStorage:FindFirstChild("Shared") or ReplicatedStorage
     GameGui = PlayerGui:FindFirstChild("GameGui")
     Session.Modules = {}
-    local indexed, seen = {}, {}
+    local indexed, seen, loaded = {}, {}, {}
     local function isModule(object)
         local ok, yes = pcall(function() return object:IsA("ModuleScript") end)
         return ok and yes
@@ -107,7 +107,7 @@ do
         end
     end
     local function refreshIndex()
-        indexed, seen = {}, {}
+        indexed, seen, loaded = {}, {}, {}
         for _, root in ipairs({ ReplicatedStorage, PlayerGui, LocalPlayer:FindFirstChild("PlayerScripts") or false }) do
             if root then
                 local ok, descendants = pcall(root.GetDescendants, root)
@@ -119,7 +119,12 @@ do
             if type(api) == "function" and not used[api] then
                 used[api] = true
                 local ok, objects = pcall(api)
-                if ok and type(objects) == "table" then for _, object in pairs(objects) do add(object) end end
+                if ok and type(objects) == "table" then
+                    for _, object in pairs(objects) do
+                        add(object)
+                        if api == getloadedmodules and isModule(object) then loaded[object] = true end
+                    end
+                end
             end
         end
     end
@@ -159,16 +164,149 @@ do
             #indexed, table.concat(names, ", "):sub(1, 1400), type(getloadedmodules), type(getmodules))
     end
     local moduleDeadline = os.clock() + 30
+    local structuralNames = { "ItemDB", "Inventory", "Net", "WorldMenu", "Roles", "Sfx" }
+    local runtimeMatches, exportMatches, triedModules = {}, {}, {}
+    local lastGC, runtimeComplete, exportsComplete = -math.huge, false, false
+    Session.ModuleScan = { Tables = 0, Loaded = 0, Errors = 0 }
+    local function functions(value, names)
+        for _, name in ipairs(names) do if type(rawget(value, name)) ~= "function" then return false end end
+        return true
+    end
+    local function isItemDatabase(value)
+        local checked, entries, named, metadata, seeds, solids = 0, 0, 0, 0, 0, 0
+        for id, item in pairs(value) do
+            checked += 1
+            if type(id) == "number" and id >= 0 and id % 1 == 0 then
+                entries += 1
+                if type(item) == "table" and type(rawget(item, "name")) == "string" and rawget(item, "name") ~= "" then
+                    named += 1
+                    if type(rawget(item, "hits")) == "number" or type(rawget(item, "solid")) == "boolean" or rawget(item, "kind") == "seed" then metadata += 1 end
+                    if rawget(item, "kind") == "seed" then seeds += 1 end
+                    if rawget(item, "solid") == true then solids += 1 end
+                end
+            end
+            if checked >= 160 or entries >= 64 then break end
+        end
+        return entries >= 12 and named / entries >= 0.85 and metadata >= 8 and (seeds > 0 or solids >= 4)
+    end
+    local function matches(name, value)
+        if type(value) ~= "table" then return false end
+        if name == "ItemDB" then return isItemDatabase(value) end
+        if name == "Inventory" then
+            return rawget(value, "capacity") == nil and functions(value, { "new", "add", "remove", "count", "used", "room", "select" })
+        end
+        if name == "Net" then
+            return functions(value, { "call", "on", "worldTag" }) and type(rawget(value, "CALLS")) == "table"
+                and type(rawget(value, "EVENTS")) == "table" and type(rawget(value, "punch")) == "table"
+                and type(rawget(rawget(value, "punch"), "send")) == "function"
+        end
+        if name == "WorldMenu" then
+            return functions(value, { "mount", "isDown" }) and type(rawget(value, "SKINS")) == "table"
+                and type(rawget(value, "KEYS")) == "table" and type(rawget(value, "DEFAULT_SKIN")) == "number"
+        end
+        if name == "Roles" then return functions(value, { "isDeveloper", "isModerator", "isUndercover" }) end
+        if name == "Sfx" then return functions(value, { "play", "playAt", "loop" }) end
+        return false
+    end
+    local function rememberMatch(target, name, value, object)
+        local previous = target[name]
+        if previous and previous.Value ~= value then previous.Ambiguous = true
+        elseif not previous then target[name] = { Value = value, Object = object } end
+    end
+    local function inspectValue(target, value, object)
+        if type(value) ~= "table" then return end
+        for _, name in ipairs(structuralNames) do
+            local ok, yes = pcall(matches, name, value)
+            if ok and yes then rememberMatch(target, name, value, object) end
+        end
+    end
+    local function scanRuntime()
+        if os.clock() - lastGC < 3 or type(getgc) ~= "function" then return end
+        lastGC = os.clock()
+        local ok, objects = pcall(getgc, true)
+        if not ok or type(objects) ~= "table" then ok, objects = pcall(getgc) end
+        if not ok or type(objects) ~= "table" then return end
+        runtimeMatches = {}
+        runtimeComplete = true
+        local visited = 0
+        for _, value in pairs(objects) do
+            if not alive() or os.clock() >= moduleDeadline then runtimeComplete = false break end
+            if type(value) == "table" then
+                Session.ModuleScan.Tables += 1
+                inspectValue(runtimeMatches, value)
+            end
+            visited += 1
+            if visited % 1000 == 0 then task.wait() end
+        end
+    end
+    local function clientModule(object)
+        -- Jangan membaca export module CoreGui/engine atau menjalankan modul yang belum dimuat.
+        local parent = object
+        for _ = 1, 40 do
+            if parent == ReplicatedStorage or parent == PlayerGui then return true end
+            if not parent then break end
+            parent = parent.Parent
+        end
+        return false
+    end
+    local function scanLoaded()
+        exportsComplete = true
+        for object in pairs(loaded) do
+            if not alive() or os.clock() >= moduleDeadline then exportsComplete = false break end
+            if not triedModules[object] and clientModule(object) then
+                triedModules[object] = true
+                Session.InitStep = "membaca export client " .. object:GetFullName()
+                local done, ok, value = false, false, nil
+                local worker = task.spawn(function()
+                    ok, value = pcall(require, object)
+                    done = true
+                end)
+                local untilTime = math.min(moduleDeadline, os.clock() + 1)
+                while alive() and not done and os.clock() < untilTime do task.wait(0.05) end
+                if done and ok then
+                    Session.ModuleScan.Loaded += 1
+                    inspectValue(exportMatches, value, object)
+                else
+                    Session.ModuleScan.Errors += 1
+                    Session.ModuleScan.LastError = object:GetFullName() .. ": " .. (done and tostring(value):sub(1, 180) or "batas waktu membaca export")
+                    if not done and task.cancel and worker then pcall(task.cancel, worker) end
+                end
+                task.wait()
+            end
+        end
+    end
+    local function structuralModule(name)
+        if not table.find(structuralNames, name) then return nil end
+        scanRuntime()
+        local found = runtimeMatches[name]
+        if runtimeComplete and found and not found.Ambiguous then return found.Value, found.Object end
+        scanLoaded()
+        found = exportMatches[name]
+        if exportsComplete and found then
+            if found.Ambiguous then return nil, nil, "beberapa export cocok dengan bentuk " .. name end
+            return found.Value, found.Object
+        end
+        if runtimeMatches[name] and runtimeMatches[name].Ambiguous then return nil, nil, "beberapa tabel runtime cocok dengan bentuk " .. name end
+    end
     local function loadModule(parent, name, required)
         Session.InitStep = "mencari modul " .. name
         local object, reason = findModule(parent, name)
+        local value, shapedObject
+        if not object and not reason then value, shapedObject, reason = structuralModule(name) end
         while not object and not reason and required and alive() and os.clock() < moduleDeadline do
+            if value then break end
             -- Satu batas waktu bersama; tidak menunggu folder Shared yang bisa sudah dipindah.
             if parent then parent:WaitForChild(name, math.min(1, moduleDeadline - os.clock()))
             else task.wait(0.25) end
             task.wait(0.1) -- child bernama sama bisa berupa Folder; jangan melakukan busy loop
             refreshIndex()
             object, reason = findModule(parent, name)
+            if not object and not reason then value, shapedObject, reason = structuralModule(name) end
+        end
+        if value then
+            Session.Modules[name] = shapedObject and shapedObject:GetFullName() or "runtime:" .. name
+            print("[n4th] " .. name .. " dikenali dari data: " .. Session.Modules[name])
+            return true, value, shapedObject
         end
         if object then
             Session.InitStep = "memuat " .. object:GetFullName()
@@ -179,10 +317,12 @@ do
             end
             reason = ok and "hasil require bukan tabel" or tostring(result)
         end
-        local message = "[n4th] Modul " .. name .. ": " .. (reason or "tidak ditemukan setelah pencarian 30 detik")
+        local message = "[n4th] Modul " .. name .. ": " .. (reason or (required and "tidak ditemukan setelah pencarian 30 detik" or "tidak ditemukan"))
         if required then
             Session.BootstrapReport = report()
             warn("[n4th] Struktur client: " .. Session.BootstrapReport)
+            warn(("[n4th] Pemindaian data: tabel=%d | export=%d | gagal=%d | terakhir=%s"):format(
+                Session.ModuleScan.Tables, Session.ModuleScan.Loaded, Session.ModuleScan.Errors, tostring(Session.ModuleScan.LastError)))
             error(message .. ". Jalankan n4th-diagnose.lua untuk membaca struktur client terbaru.", 0)
         end
         warn(message .. " (opsional, lanjut memuat menu)")
@@ -197,7 +337,7 @@ do
     local _, itemDB, itemModule = loadModule(Shared, "ItemDB", true)
     ItemDB = itemDB
     -- Modul yang terpisah folder tetap bisa dicari melalui indeks client.
-    Shared = itemModule.Parent or Shared
+    Shared = (itemModule and itemModule.Parent) or Shared
     local _, inventory = loadModule(Shared, "Inventory", false)
     InventoryModule = inventory
     NetOk, Net = loadModule(Shared, "Net", false)

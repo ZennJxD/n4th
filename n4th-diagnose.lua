@@ -52,7 +52,7 @@ local function describeFunction(fn)
     end
     return result
 end
-emit("n4th diagnosis v5 | Place=" .. tostring(game.PlaceId) .. " | Version=" .. tostring(game.PlaceVersion))
+emit("n4th diagnosis v6 | Place=" .. tostring(game.PlaceId) .. " | Version=" .. tostring(game.PlaceVersion))
 emit("API getgc=" .. type(getgc) .. " | constants=" .. type(constants) .. " | getconnections=" .. type(getconnections))
 emit("Raw API constants debug=" .. type(debug and debug.getconstants) .. " global=" .. type(getconstants)
     .. " | upvalues debug=" .. type(debug and debug.getupvalues) .. " global=" .. type(getupvalues))
@@ -60,6 +60,11 @@ local globals = (getgenv and getgenv()) or _G
 local session = globals.__n4thOpus
 emit("Session build=" .. tostring(session and session.Build) .. " | ready=" .. tostring(session and session.Ready))
 if session and session.BootstrapReport then emit("Startup structure: " .. session.BootstrapReport) end
+if session and type(session.ModuleScan) == "table" then
+    local scan = session.ModuleScan
+    emit("Module data scan tables=" .. tostring(scan.Tables) .. " exports=" .. tostring(scan.Loaded)
+        .. " failed=" .. tostring(scan.Errors) .. " last=" .. tostring(scan.LastError))
+end
 if session and type(session.Modules) == "table" then
     for name, path in pairs(session.Modules) do emit("Resolved module " .. name .. "=" .. tostring(path)) end
 end
