@@ -5,7 +5,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = nama versi l
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-09-world-finder-1"
+Session.Build = "2026-11-09-drop-finder-2"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -326,12 +326,12 @@ local WorldFinder = {
     Manual = "",
     Limit = 100,
     DelaySec = 8,
-    StopOnFound = true,
     WebhookEach = false,
     Checked = 0, Found = 0, Locked = 0, Unknown = 0, Failed = 0,
     Status = "Mati",
     Results = {},
     FoundNames = {},
+    Logs = {},
 }
 
 local Guard = {
@@ -582,6 +582,24 @@ I18N.EN = {
     ["Kirim world tanpa lock dan ringkasan hasil hunting"] = "Send unlocked worlds and search summaries",
     ["Notif setiap world"] = "Notify for every world", ["Sertakan hasil terkunci, belum pasti, dan gagal masuk"] = "Include locked, unknown, and failed results",
     ["Tes webhook World Finder"] = "Test World Finder webhook",
+    ["Proses sekarang"] = "Current task", ["Log terbaru"] = "Latest logs", ["Belum ada proses"] = "No activity yet",
+    ["Salin log"] = "Copy logs", ["Salin riwayat proses untuk dibaca atau dikirim"] = "Copy the activity history to review or share",
+    ["Cari world tanpa lock"] = "Find unlocked worlds", ["Pengaturan pencarian"] = "Search settings",
+    ["Pindah manual"] = "Manual travel", ["Jenis nama"] = "Name type",
+    ["Pilih nama pendek, kata, BUY, atau daftar buatanmu"] = "Choose short names, words, BUY names, or your own list",
+    ["Daftar world"] = "World list", ["Untuk mode Daftar sendiri. Pisahkan nama dengan koma."] = "For Custom list mode. Separate names with commas.",
+    ["Mulai cari"] = "Start search", ["Berhenti"] = "Stop",
+    ["Masuk ke kandidat untuk cek lock. Berhenti saat ketemu world tanpa lock."] = "Enter candidates to check locks. Stop when an unlocked world is found.",
+    ["Selesaikan proses aktif lalu berhenti di world terakhir"] = "Finish the current operation and stop in the last world",
+    ["Jumlah world"] = "World count", ["Batas nama yang dicek dalam satu pencarian"] = "Maximum names to check in one search",
+    ["Jeda pencarian (detik)"] = "Search delay (seconds)", ["Waktu tunggu sebelum memeriksa kandidat berikutnya"] = "Wait before checking the next candidate",
+    ["Nama world"] = "World name", ["Isi nama world. Format /warp BUYSEED juga bisa."] = "Enter a world name. You can also use /warp BUYSEED.",
+    ["Pindah & cek"] = "Travel & check", ["Masuk ke nama yang kamu isi dan tampilkan hasil lock"] = "Enter the specified world and show its lock status",
+    ["Cek world ini"] = "Check this world", ["Periksa lock di world tempat kamu berada"] = "Check locks in your current world",
+    ["Link webhook"] = "Webhook URL", ["Tempel webhook channel Discord tujuan"] = "Paste the destination Discord channel webhook",
+    ["Kirim hasil ke Discord"] = "Send results to Discord", ["Kirim world yang ditemukan dan ringkasan pencarian"] = "Send worlds found and the search summary",
+    ["Kirim setiap hasil"] = "Send every result", ["Sertakan kandidat terkunci dan yang gagal diperiksa"] = "Include locked candidates and failed checks",
+    ["Tes notifikasi"] = "Test notification", ["Kirim pesan percobaan ke Discord"] = "Send a test message to Discord",
     ["Seed sudah banyak: jeda, drop ke titik drop (tab Titik Drop), balik ke posisi farm"] =
         "Too many seeds: pause, drop at the drop point (Drop Point tab), return to farm position",
     ["Seed dari block yang dipilih"] = "Seeds of the selected block",
@@ -1328,7 +1346,7 @@ Config.add("Lahan", Land, { "X0", "X1", "Y0" })
 Config.add("Bangun", Build, { "BlockId", "ThenPabrik", "BreakX", "BreakY", "Tiles" })
 Config.add("Vending", Vend, { "Mode", "Point", "Items", "DropX", "DropY" })
 Config.add("AutoDrop", AutoDrop, { "Items", "World", "X", "Y", "Facing" })
-Config.add("WorldFinder", WorldFinder, { "Mode", "Custom", "Manual", "Limit", "DelaySec", "StopOnFound", "WebhookEach" })
+Config.add("WorldFinder", WorldFinder, { "Mode", "Custom", "Manual", "Limit", "DelaySec", "WebhookEach" })
 Config.add("Pabrik", Pabrik, {
     "SeedId", "WholeWorld", "Tiles", "BreakX", "BreakY",
     "Drop", "Keep", "DropAt", "DropWorld", "DropX", "DropY",
@@ -3136,7 +3154,7 @@ local function reachOffsets(R)
     return floor(R), math.ceil(-R + 0.025), floor(R + 0.025)
 end
 
-local function astar(sx, sy, goals, gx, gy, R, useBlock)
+local function astar(sx, sy, goals, gx, gy, R, useBlock, route)
     local w = Refs.World
     if not w then return nil, false, {} end
     local W, H = w.w, w.h
@@ -3187,6 +3205,7 @@ local function astar(sx, sy, goals, gx, gy, R, useBlock)
     end
 
     local function isGoal(nx, ny)
+        if route and not route.point(nx, ny) then return false end
         -- goals.maxY: tempat berdiri tidak boleh lebih bawah dari ini (Bangun Lahan)
         if goals.maxY and ny > goals.maxY then return false end
         for ty = ny + dyLo, ny + dyHi do
@@ -3207,14 +3226,16 @@ local function astar(sx, sy, goals, gx, gy, R, useBlock)
     end
 
     local ex, ey, ek, ec, eb = {}, {}, {}, {}, {}
-    local n = 0
+    local n, fromX, fromY = 0, sx, sy
     local function add(x, y, kind, cost, build)
+        if route and not route.edge(fromX, fromY, x, y, kind) then return end
         n += 1
         ex[n], ey[n], ek[n], ec[n], eb[n] = x, y, kind, cost, build
     end
 
     local function expand(x, y)
         n = 0
+        fromX, fromY = x, y
         for s = -1, 1, 2 do
             local ax = x + s
             if open(ax, y) then
@@ -3376,6 +3397,11 @@ end
 
 local function frame()
     task.wait()
+    if Move.HomingRoute and not Move.HomingRoute.safe(playerState()) then
+        releaseInput()
+        Move.Homing = false
+        return false
+    end
     return autoOn()
 end
 
@@ -3440,7 +3466,8 @@ local function steerX(s, targetX, tol)
 end
 
 -- Jalan sampai berdiri di tengah tile tujuan
-local function execWalk(tx, ty)
+local function execWalk(tx, ty, tolerance)
+    tolerance = tolerance or 0.2
     local cx = tx + 0.5
     local s0 = playerState()
     if not s0 then return false end
@@ -3451,8 +3478,8 @@ local function execWalk(tx, ty)
         if not s or s.dead then return false end
         local nx, ny = floor(s.x), floor(s.y - 0.475)
         if s.grounded and ny ~= ty then return false end
-        steerX(s, cx, 0.1)
-        if nx == tx and abs(s.x - cx) <= 0.2 and s.grounded and abs(s.vx or 0) < 2 then
+        steerX(s, cx, math.min(0.1, tolerance * 0.5))
+        if nx == tx and abs(s.x - cx) <= tolerance and s.grounded and abs(s.vx or 0) < 2 then
             AutoInput.left, AutoInput.right = false, false
             return true
         end
@@ -5450,12 +5477,14 @@ end
 
 -- Jalan ke 1 tile tertentu (dipakai Penjaga: balik ke posisi Auto Farm).
 -- Pakai A* yang sama, tanpa taruh block.
-local function walkTo(tx, ty, maxSec, live)
+local function walkTo(tx, ty, maxSec, live, route)
     local w = Refs.World
     if not w or not OrigIsDown then return false end
     if tx < 0 or ty < 0 or tx >= w.w or ty >= w.h then return false end
+    if route and not route.point(tx, ty) then return false end
     Move.Homing = true
     Move.HomingLive = live
+    Move.HomingRoute = route
     autoBegin()
     local goal = { [ty * w.w + tx] = true }
     local t0, ok = os.clock(), false
@@ -5466,10 +5495,10 @@ local function walkTo(tx, ty, maxSec, live)
         else
             local sx, sy = startNode(s)
             if sx == tx and sy == ty and s.grounded then
-                ok = true
+                ok = not route or execWalk(tx, ty, 0.08)
                 break
             end
-            local path = astar(sx, sy, goal, tx, ty, 0.5, false)
+            local path = astar(sx, sy, goal, tx, ty, 0.5, false, route)
             if not path then break end -- tidak ada jalan
             if #path > 0 then followPath(path) end
             releaseInput()
@@ -5478,6 +5507,7 @@ local function walkTo(tx, ty, maxSec, live)
     end
     Move.Homing = false
     Move.HomingLive = nil
+    Move.HomingRoute = nil
     autoEnd()
     return ok
 end
@@ -5977,11 +6007,89 @@ do
         return labels, picked
     end
 
-    local function protectDrop(id, x, y, world)
+    local function protectDrop(id, x, y, world, facing)
         for _, zone in ipairs(AutoDrop.Zones) do
-            if zone.id == id and zone.world == world and zone.x == x and zone.y == y then return end
+            if zone.id == id and zone.world == world and zone.x == x and zone.y == y then
+                zone.dropX, zone.dropY, zone.at = x + facing, y, os.clock()
+                return
+            end
         end
-        AutoDrop.Zones[#AutoDrop.Zones + 1] = { id = id, x = x, y = y, world = world }
+        AutoDrop.Zones[#AutoDrop.Zones + 1] = {
+            id = id, x = x, y = y, world = world, dropX = x + facing, dropY = y, at = os.clock(),
+        }
+    end
+
+    -- Hindari koordinat item asli, dengan cadangan arah drop selama replikasi.
+    function AutoDrop.route()
+        local obstacles, current = {}, playerState()
+        for _, zone in ipairs(AutoDrop.Zones) do
+            if zone.world == Guard.worldName() then
+                local found = false
+                for _, drop in pairs(Drops.list or {}) do
+                    if type(drop) == "table" and drop.id == zone.id and (drop.n or 0) > 0
+                        and type(drop.x) == "number" and type(drop.y) == "number"
+                        and abs(drop.x - zone.x) <= 2.5 and abs(drop.y - zone.y) <= 2.5 then
+                        obstacles[#obstacles + 1] = { x = drop.x, y = drop.y }
+                        found = true
+                    end
+                end
+                if os.clock() - (zone.at or 0) < 5 or (not found and not Drops.list) then
+                    obstacles[#obstacles + 1] = { x = zone.dropX or zone.x, y = zone.dropY or zone.y }
+                end
+            end
+        end
+        local radius = 0.85 -- jarak sentuh game sekitar 0.6 tile, ditambah ruang berhenti
+        local function inside(x, y, item) return abs(x - item.x) < radius and abs(y - item.y) < radius end
+        for _, item in ipairs(obstacles) do
+            item.escaping = current and inside(current.x, current.y - 0.475, item) or false
+            item.startDistance = current and abs(current.x - item.x) or 0
+        end
+        local route = {}
+        function route.point(x, y)
+            for _, item in ipairs(obstacles) do if inside(x + 0.5, y + 0.5, item) then return false end end
+            return true
+        end
+        function route.edge(fx, fy, tx, ty, kind)
+            local x0, y0, x1, y1 = fx + 0.5, fy + 0.5, tx + 0.5, ty + 0.5
+            for _, item in ipairs(obstacles) do
+                if inside(x0, y0, item) then
+                    -- Keluar dari radius drop hanya dengan berjalan menjauh.
+                    if kind ~= "walk" or fy ~= ty or (x0 - item.x) * (x1 - item.x) <= 0
+                        or abs(x1 - item.x) <= abs(x0 - item.x) then return false end
+                else
+                    local top = math.min(y0, y1)
+                    if kind == "jump" or kind == "gap" or kind == "stair" then top -= 3 end
+                    if math.max(x0, x1) > item.x - radius and math.min(x0, x1) < item.x + radius
+                        and math.max(y0, y1) > item.y - radius and top < item.y + radius then return false end
+                end
+            end
+            return true
+        end
+        function route.safe(s)
+            if not s then return false end
+            for _, item in ipairs(obstacles) do
+                if inside(s.x, s.y - 0.475, item) then
+                    if not item.escaping or abs(s.x - item.x) < item.startDistance - 0.02 then return false end
+                else item.escaping = false end
+            end
+            return true
+        end
+        return route
+    end
+
+    local function retreat(facing, live)
+        local s = playerState()
+        if not s then return false end
+        local x, y = startNode(s)
+        local route = AutoDrop.route()
+        for distance = 1, 2 do
+            local target = x - facing * distance
+            if target >= 0 and target < Refs.World.w and openAt(target, y) and realSupport(target, y)
+                and route.point(target, y) and route.edge(x, y, target, y, "walk") then
+                return walkTo(target, y, 6, live, route)
+            end
+        end
+        return route.point(x, y)
     end
 
     local function atPoint(x, y, facing)
@@ -6002,13 +6110,13 @@ do
                 and Refs.World == world and world.fg == fg and Guard.worldName() == saved.world
         end
         local function live() return sameWorld() and AutoDrop.On end
-        local returned, failure = false, nil
+        local returned, failure, didDrop = false, nil, false
         local ok, err = pcall(function()
             Guard.stopAll(true)
             AutoDrop.Status = "Menjeda farming untuk drop"
             task.wait(1.2)
             if not live() then return end
-            if not walkTo(x, y, 45, live) or not live() then
+            if not walkTo(x, y, 45, live, AutoDrop.route()) or not live() then
                 failure = "Posisi drop tidak terjangkau"
                 return
             end
@@ -6026,10 +6134,13 @@ do
             for _, id in ipairs(items) do
                 if not canDrop() then break end
                 if table.find(AutoDrop.Items, id) and invCount(id) >= 200 then
-                    protectDrop(id, x + 0.5, y + 0.5, saved.world)
                     AutoDrop.Status = "Drop " .. itemName(id) .. " x200"
                     local got, reason = dropItems(id, 200, canDrop, false)
                     AutoDrop.Dropped += got
+                    if got > 0 then
+                        didDrop = true
+                        protectDrop(id, x + 0.5, y + 0.5, saved.world, facing)
+                    end
                     if reason then failure = reason break end
                 end
             end
@@ -6037,12 +6148,15 @@ do
         if not ok then failure = tostring(err) end
         -- Pulang tetap dilakukan ketika toggle dimatikan di tengah perjalanan.
         if sameWorld() then
-            AutoDrop.Status = "Kembali ke posisi farming"
-            local backOk, result = pcall(walkTo, hx, hy, 45, sameWorld)
+            AutoDrop.Status = "Menjauh dari item dan mencari jalur pulang"
+            local backOk, result = pcall(function()
+                if didDrop and not retreat(facing, sameWorld) then return false end
+                return walkTo(hx, hy, 45, sameWorld, AutoDrop.route())
+            end)
             returned = backOk and result == true
             if not backOk then failure = tostring(result) end
         end
-        Move.Homing, Move.HomingLive = false, nil
+        Move.Homing, Move.HomingLive, Move.HomingRoute = false, nil, nil
         releaseInput()
         autoEnd()
         AutoDrop.Busy, AutoDrop.Saved = false, nil
@@ -6051,8 +6165,13 @@ do
             if not resumed then failure = tostring(resumeError) end
         elseif sameWorld() then
             AutoDrop.On = false
-            failure = "Gagal kembali ke posisi awal. Auto Drop dihentikan"
-            if UI.AutoDropToggle then UI.later("autoDropOff", function() UI.AutoDropToggle:Set(false) end) end
+            failure = "Jalur pulang aman tidak ditemukan. Auto Drop dihentikan; ubah tile atau arah drop"
+            if UI.AutoDropToggle then
+                UI.later("autoDropOff", function()
+                    UI.AutoDropToggle:Set(false)
+                    AutoDrop.Status = failure
+                end)
+            end
         end
         AutoDrop.NextTry = os.clock() + (failure and 10 or 1)
         AutoDrop.Status = failure or (AutoDrop.On and "Menunggu item mencapai 200" or "Mati")
@@ -11816,6 +11935,11 @@ Config.add("Discord", Hook, { "On", "Url", "Penjaga", "Stop", "Full", "Bonus", "
 do
     local modes = { "Campuran", "3 Huruf", "4 Huruf", "Kata Indonesia", "English Words", "BUY + Item", "Daftar sendiri" }
     WorldFinder.Modes = modes
+    function WorldFinder.log(message)
+        WorldFinder.Status = tostring(message)
+        WorldFinder.Logs[#WorldFinder.Logs + 1] = os.date("%H:%M:%S") .. "  " .. tostring(message):gsub("\n", " | ")
+        if #WorldFinder.Logs > 100 then table.remove(WorldFinder.Logs, 1) end
+    end
     local wordsID = "API AIR AKU AWAN AYAM BATU BINTANG BIRU BUKU BUMI BUNGA CAHAYA CINTA DAUN DEWA EMAS GARAM GULA GUNUNG HATI HUJAN IKAN INDAH JALAN KAYU KOPI KOTA KUCING LANGIT LAUT MADU MALAM MATA MIMPI NAGA NASI OMBAK PAGI PASIR PELANGI PINTU POHON PULAU RAJA RATU RUMAH SABUN SATU SAYUR SENJA SUSU TANAH TIGA TIMUR UANG UJIAN ULAR UTARA WARNA WAKTU"
     local wordsEN = "AIR APPLE ASH AURA BEACH BIRD BLUE BOOK BREAD BRICK CANDY CLOUD COIN CORAL CROWN DAWN DOOR DREAM DUSK EARTH EAST FIRE FISH FLAME FLOWER FOREST FROST GAME GARDEN GEM GLASS GOLD GREEN HOME HONEY ICE ISLAND JADE KING LAKE LEAF LIGHT LION LOVE LUCK MAGIC MAPLE MILK MINT MOON NIGHT NORTH OCEAN PEARL PINK PLANT RAIN RED RIVER ROSE SAND SEED SILK SKY SNOW SOUL STAR STONE SUN TREE WATER WEST WIND WOLF WOOD"
     local buyWords = "SEED SEEDS BLOCK BLOCKS FARM DIRT STONE WOOD LAVA DOOR LOCK WL DL BGL GEMS WATER SAND GLASS FLOWER TREE APPLE GRASS ROCK BRICK PLATFORM PICKAXE WINGS FIST RAYMAN CLOTHES HAT SHIRT PANTS SHOES HAND"
@@ -11959,10 +12083,12 @@ do
         if not live() then return false, "Dihentikan" end
         if Guard.worldName() == name and Auto.here() then return true end
         if Guard.worldName() ~= "" then
+            WorldFinder.log("Keluar dari " .. Guard.worldName())
             if not Guard.leaveWorld() then return false, "Gagal keluar dari world sekarang" end
             if not waitFor(2, live) then return false, "Dihentikan" end
         end
         if not live() then return false, "Dihentikan" end
+        WorldFinder.log("Masuk ke " .. name .. " untuk memeriksa lock")
         local ok, reason = Guard.enterWorld(name)
         if not live() then return false, "Dihentikan" end
         if not ok then return false, tostring(reason or "World tidak bisa dimasuki") end
@@ -11972,6 +12098,7 @@ do
     end
 
     local function inspectLoaded(name, live)
+        WorldFinder.log("Memeriksa lock di " .. name .. ". Menunggu data lengkap.")
         local deadline, previous, previousGrid = os.clock() + 6, nil, nil
         local result = { kind = "unknown", detail = "Data world belum lengkap" }
         while live() and os.clock() < deadline do
@@ -11996,14 +12123,14 @@ do
         else WorldFinder.Unknown += 1 end
         local message = name .. " | " .. (labels[result.kind] or labels.unknown) .. " | " .. result.detail
         WorldFinder.Results[#WorldFinder.Results + 1] = message
-        WorldFinder.Status = message
+        WorldFinder.log(message)
         if result.kind == "unlocked" or WorldFinder.WebhookEach then Hook.send("finder", ("World Finder\n" .. message):sub(1, 1600)) end
         if result.kind == "unlocked" then notify("World Finder", message, 10) end
     end
 
     function WorldFinder.stop()
         WorldFinder.Running = false
-        if WorldFinder.Busy then WorldFinder.Status = "Menghentikan hunting setelah perpindahan selesai" end
+        if WorldFinder.Busy then WorldFinder.log("Berhenti diminta. Menunggu proses aktif selesai.") end
     end
 
     function WorldFinder.start(manual)
@@ -12027,6 +12154,8 @@ do
         WorldFinder.Checked, WorldFinder.Found, WorldFinder.Locked, WorldFinder.Unknown, WorldFinder.Failed = 0, 0, 0, 0, 0
         WorldFinder.Results, WorldFinder.FoundNames = {}, {}
         WorldFinder.Total = #queue
+        WorldFinder.log(("Mulai %s. %d nama akan diperiksa."):format(manual and "pemeriksaan manual" or "pencarian", #queue))
+        WorldFinder.log("Data lock dibaca setelah masuk ke masing-masing world.")
         local token = Guard.Token
         local function live()
             return alive() and WorldFinder.Running and not WorldFinder.Cancelled and Guard.Token == token and Guard.Mode == "idle"
@@ -12034,7 +12163,8 @@ do
         local paused, pauseError = pcall(Guard.stopAll, nil, true)
         if not paused then
             WorldFinder.Running, WorldFinder.Busy, WorldFinder.Saved = false, false, nil
-            notify("World Finder", "Gagal menghentikan farming: " .. tostring(pauseError), 5)
+            WorldFinder.log("Gagal menghentikan farming: " .. tostring(pauseError))
+            notify("World Finder", WorldFinder.Status, 5)
             return
         end
         Rejoin.Last, Rejoin.LastAt = nil, 0
@@ -12043,14 +12173,21 @@ do
                 if not waitFor(1.2, live) then return end
                 for index, name in ipairs(queue) do
                     if not live() then break end
-                    WorldFinder.Status = ("Warp %d/%d: %s"):format(index, #queue, name)
+                    WorldFinder.log(("Memeriksa %d/%d: %s"):format(index, #queue, name))
                     local entered, message = WorldFinder.warp(name, live)
                     if not live() then break end
                     local result = entered and inspectLoaded(name, live) or { kind = "failed", detail = message }
                     if not live() then break end
                     WorldFinder.record(name, result)
-                    if result.kind == "unlocked" and WorldFinder.StopOnFound then break end
-                    if index < #queue and not waitFor(math.max(5, tonumber(WorldFinder.DelaySec) or 8), live) then break end
+                    if result.kind == "unlocked" then
+                        WorldFinder.log("Ketemu world tanpa lock. Tetap di " .. name .. ".")
+                        break
+                    end
+                    if index < #queue then
+                        local delay = math.max(5, tonumber(WorldFinder.DelaySec) or 8)
+                        WorldFinder.log(("Menunggu %d detik, lalu cek %s"):format(delay, queue[index + 1]))
+                        if not waitFor(delay, live) then break end
+                    end
                 end
             end)
             local finished = live()
@@ -12064,7 +12201,7 @@ do
                 outcome, WorldFinder.Checked, WorldFinder.Found, WorldFinder.Locked, WorldFinder.Unknown, WorldFinder.Failed)
             if not ok then summary = "Hunting gagal: " .. tostring(reason) .. "\n" .. summary
             elseif not finished then summary = "Hunting dihentikan\n" .. summary end
-            WorldFinder.Status = summary
+            WorldFinder.log(summary)
             if alive() then
                 Hook.send("finder", ("World Finder\n" .. summary):sub(1, 1600))
                 notify("World Finder", summary, 8)
@@ -12077,40 +12214,28 @@ end
 -- ===== TAB: WORLD FINDER =====
 do (function()
     local tab = makeTab("World Finder", "globe", "fitur")
-    safe(function() UI.FinderStatus = tab:Paragraph({ Title = "Status", Desc = WorldFinder.Status }) end)
-    local manualBox = box(tab, "Warp manual", true)
-    local huntBox = box(tab, "Hunting world", true)
-    local webhookBox = box(tab, "Discord World Finder", false)
-
+    safe(function() UI.FinderStatus = tab:Paragraph({ Title = "Proses sekarang", Desc = WorldFinder.Status }) end)
+    safe(function() UI.FinderLogs = tab:Paragraph({ Title = "Log terbaru", Desc = "Belum ada proses" }) end)
     safe(function()
-        manualBox:Input({
-            Title = "Nama world atau /warp",
-            Desc = "Contoh: /warp BUYSEED",
-            Value = WorldFinder.Manual,
-            Placeholder = "/warp BUYSEED",
-            Callback = function(value) WorldFinder.Manual = tostring(value or "") end,
-        })
-    end)
-    safe(function()
-        manualBox:Button({
-            Title = "Warp & cek lock",
-            Desc = "Pindah ke nama yang diisi lalu periksa lock world",
-            Callback = function() WorldFinder.start(WorldFinder.Manual) end,
-        })
-    end)
-    safe(function()
-        manualBox:Button({
-            Title = "Cek world sekarang",
+        tab:Button({
+            Title = "Salin log",
+            Desc = "Salin riwayat proses untuk dibaca atau dikirim",
             Callback = function()
-                local name = Guard.worldName()
-                if name == "" then notify("World Finder", "Kamu belum masuk world", 4) return end
-                WorldFinder.start(name)
+                if type(setclipboard) ~= "function" then notify("World Finder", "Executor tidak mendukung clipboard", 3) return end
+                local ok = pcall(setclipboard, table.concat(WorldFinder.Logs, "\n"))
+                notify("World Finder", ok and "Log sudah disalin" or "Gagal menyalin log", 3)
             end,
         })
     end)
+    local controls = box(tab, "Cari world tanpa lock", true)
+    local settings = box(tab, "Pengaturan pencarian", false)
+    local manualBox = box(tab, "Pindah manual", false)
+    local webhookBox = box(tab, "Notifikasi Discord", false)
+
     safe(function()
-        huntBox:Dropdown({
-            Title = "Sumber nama",
+        controls:Dropdown({
+            Title = "Jenis nama",
+            Desc = "Pilih nama pendek, kata, BUY, atau daftar buatanmu",
             Values = WorldFinder.Modes,
             Value = WorldFinder.Mode,
             Callback = function(value)
@@ -12120,55 +12245,71 @@ do (function()
         })
     end)
     safe(function()
-        huntBox:Input({
-            Title = "Daftar nama sendiri",
-            Desc = "Pisahkan dengan koma atau spasi. Dipakai mode Daftar sendiri dan Campuran.",
+        controls:Input({
+            Title = "Daftar world",
+            Desc = "Untuk mode Daftar sendiri. Pisahkan nama dengan koma.",
             Value = WorldFinder.Custom,
-            Placeholder = "API, SKY, BUYSEED, BUYDIRT",
+            Placeholder = "BUYSEED, LANGIT, DREAM",
             Callback = function(value) WorldFinder.Custom = tostring(value or "") end,
         })
     end)
-    addNumber(huntBox, {
-        Title = "Maksimal world per hunting",
+    safe(function()
+        controls:Button({
+            Title = "Mulai cari",
+            Desc = "Masuk ke kandidat untuk cek lock. Berhenti saat ketemu world tanpa lock.",
+            Callback = function() WorldFinder.start() end,
+        })
+    end)
+    safe(function()
+        controls:Button({
+            Title = "Berhenti",
+            Desc = "Selesaikan proses aktif lalu berhenti di world terakhir",
+            Callback = WorldFinder.stop,
+        })
+    end)
+    addNumber(settings, {
+        Title = "Jumlah world",
+        Desc = "Batas nama yang dicek dalam satu pencarian",
         Min = 1, Max = 500, Step = 1, Default = WorldFinder.Limit,
         Callback = function(value) WorldFinder.Limit = math.floor(value) end,
     })
-    addNumber(huntBox, {
-        Title = "Jeda antar world (detik)",
+    addNumber(settings, {
+        Title = "Jeda pencarian (detik)",
+        Desc = "Waktu tunggu sebelum memeriksa kandidat berikutnya",
         Min = 5, Max = 60, Step = 1, Default = WorldFinder.DelaySec,
         Callback = function(value) WorldFinder.DelaySec = math.floor(value) end,
     })
     safe(function()
-        huntBox:Toggle({
-            Title = "Berhenti saat ketemu",
-            Desc = "Tetap di world tanpa lock yang ditemukan",
-            Value = WorldFinder.StopOnFound,
-            Callback = function(on) WorldFinder.StopOnFound = on end,
+        manualBox:Input({
+            Title = "Nama world",
+            Desc = "Isi nama world. Format /warp BUYSEED juga bisa.",
+            Value = WorldFinder.Manual,
+            Placeholder = "BUYSEED",
+            Callback = function(value) WorldFinder.Manual = tostring(value or "") end,
         })
     end)
     safe(function()
-        UI.FinderToggle = huntBox:Toggle({
-            Title = "Jalankan World Finder",
-            Desc = "Menghentikan farming selama hunting. Cek WL, Small Lock, Big Lock, Huge Lock, dan lock lainnya.",
-            Value = false,
-            Callback = function(on)
-                if on then
-                    WorldFinder.start()
-                    if not WorldFinder.Running then UI.later("finderOff", function() UI.FinderToggle:Set(false) end) end
-                else WorldFinder.stop() end
+        manualBox:Button({
+            Title = "Pindah & cek",
+            Desc = "Masuk ke nama yang kamu isi dan tampilkan hasil lock",
+            Callback = function() WorldFinder.start(WorldFinder.Manual) end,
+        })
+    end)
+    safe(function()
+        manualBox:Button({
+            Title = "Cek world ini",
+            Desc = "Periksa lock di world tempat kamu berada",
+            Callback = function()
+                local name = Guard.worldName()
+                if name == "" then notify("World Finder", "Kamu belum masuk world", 4) return end
+                WorldFinder.start(name)
             end,
         })
     end)
     safe(function()
-        huntBox:Button({
-            Title = "Hentikan hunting",
-            Callback = WorldFinder.stop,
-        })
-    end)
-    safe(function()
         webhookBox:Input({
-            Title = "URL Webhook Discord",
-            Desc = "Memakai URL yang sama dengan tab Discord",
+            Title = "Link webhook",
+            Desc = "Tempel webhook channel Discord tujuan",
             Value = Hook.Url,
             Placeholder = "https://discord.com/api/webhooks/...",
             Callback = function(value)
@@ -12180,8 +12321,8 @@ do (function()
     end)
     safe(function()
         UI.FinderWebhook = webhookBox:Toggle({
-            Title = "Notifikasi World Finder",
-            Desc = "Kirim world tanpa lock dan ringkasan hasil hunting",
+            Title = "Kirim hasil ke Discord",
+            Desc = "Kirim world yang ditemukan dan ringkasan pencarian",
             Value = Hook.On and Hook.Finder,
             Callback = function(on)
                 if on and not Hook.valid(Hook.Url) then
@@ -12196,15 +12337,16 @@ do (function()
     end)
     safe(function()
         webhookBox:Toggle({
-            Title = "Notif setiap world",
-            Desc = "Sertakan hasil terkunci, belum pasti, dan gagal masuk",
+            Title = "Kirim setiap hasil",
+            Desc = "Sertakan kandidat terkunci dan yang gagal diperiksa",
             Value = WorldFinder.WebhookEach,
             Callback = function(on) WorldFinder.WebhookEach = on end,
         })
     end)
     safe(function()
         webhookBox:Button({
-            Title = "Tes webhook World Finder",
+            Title = "Tes notifikasi",
+            Desc = "Kirim pesan percobaan ke Discord",
             Callback = function()
                 if not (Hook.On and Hook.Finder and Hook.valid(Hook.Url)) then
                     notify("World Finder", "Aktifkan notifikasi dan isi URL webhook dulu", 4)
@@ -12216,14 +12358,21 @@ do (function()
         })
     end)
     task.spawn(function()
-        local last
+        local lastStatus, lastLogs
         while alive() do
-            local recent = {}
-            for index = math.max(1, #WorldFinder.Results - 4), #WorldFinder.Results do recent[#recent + 1] = WorldFinder.Results[index] end
-            local text = WorldFinder.Status .. "\n" .. table.concat(recent, "\n")
-            if text ~= last and UI.FinderStatus then
-                last = text
+            if UI.FinderStatus and WorldFinder.Status ~= lastStatus then
+                local text = WorldFinder.Status
+                lastStatus = text
                 UI.later("finderStatus", function() UI.FinderStatus:SetDesc(text) end)
+            end
+            local recent = {}
+            for index = #WorldFinder.Logs, math.max(1, #WorldFinder.Logs - 11), -1 do
+                recent[#recent + 1] = WorldFinder.Logs[index]
+            end
+            local text = #recent > 0 and table.concat(recent, "\n") or "Belum ada proses"
+            if UI.FinderLogs and text ~= lastLogs then
+                lastLogs = text
+                UI.later("finderLogs", function() UI.FinderLogs:SetDesc(text) end)
             end
             task.wait(0.5)
         end
