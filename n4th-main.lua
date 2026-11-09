@@ -5,7 +5,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = nama versi l
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-09-drop-finder-2"
+Session.Build = "2026-11-09-finder-teleport-1"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -9510,7 +9510,10 @@ do (function() -- fungsi sendiri: variabel di dalam tidak ikut batas 200 local
     end
 
     local function stopAll(forAutoDrop, forFinder)
-        if WorldFinder.Busy and not forFinder then WorldFinder.Cancelled, WorldFinder.Running = true, false end
+        if WorldFinder.Busy and not forFinder then
+            WorldFinder.Cancelled, WorldFinder.Running = true, false
+            if WorldFinder.checkpoint then WorldFinder.checkpoint(false) end
+        end
         if AutoDrop.Busy and not forAutoDrop then AutoDrop.Cancelled = true end
         Auto.stopWalk()
         if Pabrik.Running then Pabrik.stop() end
@@ -11849,11 +11852,10 @@ do (function()
 
     -- ===== disconnect dari server =====
     local function queueScript()
-        local q = queue_on_teleport or (syn and syn.queue_on_teleport) or (fluxus and fluxus.queue_on_teleport)
+        local q = queue_on_teleport or queueonteleport or (syn and syn.queue_on_teleport) or (fluxus and fluxus.queue_on_teleport)
         local url = tostring(Rejoin.ScriptUrl or "")
         if type(q) == "function" and string.sub(url, 1, 8) == "https://" then
-            pcall(q, ("loadstring(game:HttpGet(%q))()"):format(url))
-            return true
+            return pcall(q, ("loadstring(game:HttpGet(%q))()"):format(url))
         end
         return false
     end
@@ -11861,8 +11863,10 @@ do (function()
     local function onDisconnect(msg)
         if not (Rejoin.On and Rejoin.Server) or Rejoin.Leaving then return end
         Rejoin.Leaving = true
-        local saved = Rejoin.Last or (Guard.anyRunning() and Guard.snapshot()) or nil
-        local world = saved and saved.world or Guard.worldName()
+        local finderActive = WorldFinder.Busy and WorldFinder.Running and not WorldFinder.Cancelled
+        local saved = not finderActive and (Rejoin.Last or (Guard.anyRunning() and Guard.snapshot())) or nil
+        local world = finderActive and WorldFinder.Queue and WorldFinder.Queue[WorldFinder.Index]
+            or (saved and saved.world or Guard.worldName())
         if canFile and saved then
             local data = {
                 world = saved.world, farm = saved.farm, clear = saved.clear, farmer = saved.farmer,
@@ -11871,7 +11875,9 @@ do (function()
             }
             pcall(function() writefile(PENDING, HttpService:JSONEncode(data)) end)
         end
-        local queued = queueScript()
+        local queued
+        if finderActive and WorldFinder.armTeleport then queued = WorldFinder.armTeleport()
+        else queued = queueScript() end
         Rejoin.Status = "Disconnect: rejoin..." .. (queued and "" or " (script tidak di-queue)")
         Hook.send("rejoin", "Disconnect dari server (" .. tostring(msg) .. "). Rejoin ke " .. (world ~= "" and world or "game"))
         task.spawn(function()
@@ -11939,6 +11945,108 @@ do
         WorldFinder.Status = tostring(message)
         WorldFinder.Logs[#WorldFinder.Logs + 1] = os.date("%H:%M:%S") .. "  " .. tostring(message):gsub("\n", " | ")
         if #WorldFinder.Logs > 100 then table.remove(WorldFinder.Logs, 1) end
+    end
+
+    -- Hanya menyimpan antrean milik Finder. Data ini tidak memeriksa world dari luar.
+    local teleport = game:GetService("TeleportService")
+    local pendingKey = "n4th.finder.teleport.v1"
+    local bootSource = [=[
+local globals = (getgenv and getgenv()) or _G
+if not globals.__n4thFinderBooting then
+    globals.__n4thFinderBooting = true
+    task.spawn(function()
+        if not game:IsLoaded() then game.Loaded:Wait() end
+        local players = game:GetService("Players")
+        local deadline = os.clock() + 30
+        while not players.LocalPlayer and os.clock() < deadline do task.wait(0.1) end
+        local player = players.LocalPlayer
+        local ts = game:GetService("TeleportService")
+        local ok, data = pcall(ts.GetTeleportSetting, ts, "n4th.finder.teleport.v1")
+        local ran, err = true, nil
+        if ok and type(data) == "table" and data.Active == true and data.Schema == 1
+            and data.Universe == game.GameId and data.Job ~= game.JobId
+            and player and data.User == player.UserId and type(data.At) == "number"
+            and os.time() - data.At >= 0 and os.time() - data.At < 600 then
+            ran, err = pcall(function()
+                loadstring(game:HttpGet("https://raw.githubusercontent.com/ZennJxD/n4th/refs/heads/main/n4th"))()
+            end)
+        end
+        globals.__n4thFinderBooting = nil
+        if not ran then warn("[n4th] Gagal lanjut setelah teleport: " .. tostring(err)) end
+    end)
+end
+]=]
+
+    function WorldFinder.checkpoint(active)
+        local data = false
+        if active and WorldFinder.Queue then
+            data = {
+                Schema = 1, Active = true, At = os.time(), User = LocalPlayer.UserId,
+                Universe = game.GameId, Job = game.JobId,
+                Queue = table.clone(WorldFinder.Queue), Index = WorldFinder.Index,
+                Checked = WorldFinder.Checked, Found = WorldFinder.Found, Locked = WorldFinder.Locked,
+                Unknown = WorldFinder.Unknown, Failed = WorldFinder.Failed,
+                Results = table.clone(WorldFinder.Results), FoundNames = table.clone(WorldFinder.FoundNames),
+                Logs = table.clone(WorldFinder.Logs), DelaySec = WorldFinder.DelaySec,
+                WebhookEach = WorldFinder.WebhookEach,
+                Hook = { On = Hook.On, Url = Hook.Url, Finder = Hook.Finder },
+            }
+        end
+        local ok, err = pcall(teleport.SetTeleportSetting, teleport, pendingKey, data)
+        WorldFinder.CheckpointOK = ok
+        return ok, err
+    end
+
+    function WorldFinder.armTeleport()
+        local saved, reason = WorldFinder.checkpoint(true)
+        if not saved then return false, "Gagal menyimpan antrean teleport: " .. tostring(reason) end
+        if WorldFinder.Queued then return true end
+        local queue = queue_on_teleport or queueonteleport or (syn and syn.queue_on_teleport) or (fluxus and fluxus.queue_on_teleport)
+        if type(queue) ~= "function" then return false, "Executor tidak mendukung auto-execute setelah teleport. Execute n4th lagi untuk lanjut." end
+        local ok, err = pcall(queue, bootSource)
+        WorldFinder.Queued = ok
+        return ok, not ok and ("Auto-execute gagal disiapkan: " .. tostring(err)) or nil
+    end
+
+    pcall(function()
+        table.insert(Connections, LocalPlayer.OnTeleport:Connect(function(state)
+            if not alive() then return end
+            if state == Enum.TeleportState.Failed then
+                WorldFinder.Teleporting, WorldFinder.Queued = false, false
+                if WorldFinder.Running then WorldFinder.log("Teleport gagal. Menunggu hasil masuk world.") end
+            elseif WorldFinder.Running and not WorldFinder.Cancelled and WorldFinder.Busy
+                and (state == Enum.TeleportState.Started or state == Enum.TeleportState.InProgress
+                    or state == Enum.TeleportState.WaitingForServer) then
+                WorldFinder.Teleporting = true
+                WorldFinder.log("Teleport server. Antrean akan dilanjutkan setelah game dimuat.")
+                local ok, err = WorldFinder.armTeleport()
+                if not ok then WorldFinder.log(err) end
+            end
+        end))
+    end)
+
+    function WorldFinder.startup(reconnectFn)
+        local ok, data = pcall(teleport.GetTeleportSetting, teleport, pendingKey)
+        if not ok or type(data) ~= "table" or data.Active ~= true or data.Job == game.JobId then return false end
+        local valid = data.Schema == 1 and data.Universe == game.GameId and data.User == LocalPlayer.UserId
+            and type(data.At) == "number" and os.time() - data.At >= 0 and os.time() - data.At < 600
+            and type(data.Queue) == "table" and #data.Queue > 0 and #data.Queue <= 500
+            and type(data.Index) == "number" and data.Index % 1 == 0 and data.Index >= 1 and data.Index <= #data.Queue
+        if valid then
+            for _, name in ipairs(data.Queue) do
+                if type(name) ~= "string" or WorldFinder.name(name) ~= name then valid = false break end
+            end
+        end
+        WorldFinder.checkpoint(false) -- sekali pakai; start() membuat checkpoint baru
+        if not valid then WorldFinder.log("Antrean teleport kedaluwarsa atau tidak valid. Mulai pencarian baru.") return false end
+        local deadline = os.clock() + 45
+        while alive() and os.clock() < deadline do
+            if Session.Ready and Refs.World then return WorldFinder.start(nil, data) == true end
+            if Session.Ready then pcall(reconnectFn) end
+            task.wait(1)
+        end
+        WorldFinder.log("Tidak bisa lanjut: referensi game belum tersedia. Hubungkan ke game lalu mulai lagi.")
+        return false
     end
     local wordsID = "API AIR AKU AWAN AYAM BATU BINTANG BIRU BUKU BUMI BUNGA CAHAYA CINTA DAUN DEWA EMAS GARAM GULA GUNUNG HATI HUJAN IKAN INDAH JALAN KAYU KOPI KOTA KUCING LANGIT LAUT MADU MALAM MATA MIMPI NAGA NASI OMBAK PAGI PASIR PELANGI PINTU POHON PULAU RAJA RATU RUMAH SABUN SATU SAYUR SENJA SUSU TANAH TIGA TIMUR UANG UJIAN ULAR UTARA WARNA WAKTU"
     local wordsEN = "AIR APPLE ASH AURA BEACH BIRD BLUE BOOK BREAD BRICK CANDY CLOUD COIN CORAL CROWN DAWN DOOR DREAM DUSK EARTH EAST FIRE FISH FLAME FLOWER FOREST FROST GAME GARDEN GEM GLASS GOLD GREEN HOME HONEY ICE ISLAND JADE KING LAKE LEAF LIGHT LION LOVE LUCK MAGIC MAPLE MILK MINT MOON NIGHT NORTH OCEAN PEARL PINK PLANT RAIN RED RIVER ROSE SAND SEED SILK SKY SNOW SOUL STAR STONE SUN TREE WATER WEST WIND WOLF WOOD"
@@ -12082,14 +12190,27 @@ do
     function WorldFinder.warp(name, live)
         if not live() then return false, "Dihentikan" end
         if Guard.worldName() == name and Auto.here() then return true end
+        local armed, armError = WorldFinder.armTeleport()
+        if not armed then WorldFinder.log(armError) end
+        local function waitTeleport()
+            local deadline = os.clock() + 60
+            while live() and WorldFinder.Teleporting and os.clock() < deadline do task.wait(0.25) end
+            if live() and WorldFinder.Teleporting then
+                WorldFinder.stop()
+                WorldFinder.log("Teleport terlalu lama. Pencarian dihentikan agar antrean tidak salah lanjut.")
+            end
+            return live()
+        end
         if Guard.worldName() ~= "" then
             WorldFinder.log("Keluar dari " .. Guard.worldName())
             if not Guard.leaveWorld() then return false, "Gagal keluar dari world sekarang" end
             if not waitFor(2, live) then return false, "Dihentikan" end
+            if not waitTeleport() then return false, "Dihentikan" end
         end
         if not live() then return false, "Dihentikan" end
         WorldFinder.log("Masuk ke " .. name .. " untuk memeriksa lock")
         local ok, reason = Guard.enterWorld(name)
+        if not waitTeleport() then return false, "Dihentikan" end
         if not live() then return false, "Dihentikan" end
         if not ok then return false, tostring(reason or "World tidak bisa dimasuki") end
         if not waitFor(1.5, live) then return false, "Dihentikan" end
@@ -12130,10 +12251,11 @@ do
 
     function WorldFinder.stop()
         WorldFinder.Running = false
+        WorldFinder.checkpoint(false)
         if WorldFinder.Busy then WorldFinder.log("Berhenti diminta. Menunggu proses aktif selesai.") end
     end
 
-    function WorldFinder.start(manual)
+    function WorldFinder.start(manual, pending)
         if WorldFinder.Busy then return end
         if not Session.Ready or not Refs.World or not Guard.enterWorld then notify("World Finder", "Hubungkan ke game dulu", 4) return end
         if AutoDrop.Busy or Pabrik.Traveling or Rejoin.Busy or Guard.Mode ~= "idle" then
@@ -12141,7 +12263,9 @@ do
             return
         end
         local queue
-        if manual then
+        if pending then
+            queue = pending.Queue
+        elseif manual then
             local name = WorldFinder.name(manual)
             if not name then notify("World Finder", "Nama world memakai huruf A-Z dan angka 0-9", 4) return end
             queue = { name }
@@ -12151,10 +12275,29 @@ do
         if #queue == 0 then notify("World Finder", "Daftar nama world masih kosong", 4) return end
         WorldFinder.Saved = Guard.snapshot()
         WorldFinder.Running, WorldFinder.Busy, WorldFinder.Cancelled = true, true, false
+        WorldFinder.Queue, WorldFinder.Index, WorldFinder.Teleporting = queue, pending and pending.Index or 1, false
         WorldFinder.Checked, WorldFinder.Found, WorldFinder.Locked, WorldFinder.Unknown, WorldFinder.Failed = 0, 0, 0, 0, 0
         WorldFinder.Results, WorldFinder.FoundNames = {}, {}
+        if pending then
+            for _, key in ipairs({ "Checked", "Found", "Locked", "Unknown", "Failed" }) do
+                WorldFinder[key] = math.max(0, math.floor(tonumber(pending[key]) or 0))
+            end
+            for _, key in ipairs({ "Results", "FoundNames", "Logs" }) do
+                WorldFinder[key] = type(pending[key]) == "table" and pending[key] or {}
+            end
+            WorldFinder.DelaySec = math.clamp(tonumber(pending.DelaySec) or 8, 5, 60)
+            WorldFinder.WebhookEach = pending.WebhookEach == true
+            if type(pending.Hook) == "table" then
+                Hook.On, Hook.Finder = pending.Hook.On == true, pending.Hook.Finder == true
+                if type(pending.Hook.Url) == "string" then Hook.Url = pending.Hook.Url end
+            end
+        end
         WorldFinder.Total = #queue
-        WorldFinder.log(("Mulai %s. %d nama akan diperiksa."):format(manual and "pemeriksaan manual" or "pencarian", #queue))
+        if pending then
+            WorldFinder.log(("Lanjut setelah teleport: %d/%d, tujuan %s."):format(WorldFinder.Index, #queue, queue[WorldFinder.Index]))
+        else
+            WorldFinder.log(("Mulai %s. %d nama akan diperiksa."):format(manual and "pemeriksaan manual" or "pencarian", #queue))
+        end
         WorldFinder.log("Data lock dibaca setelah masuk ke masing-masing world.")
         local token = Guard.Token
         local function live()
@@ -12168,11 +12311,17 @@ do
             return
         end
         Rejoin.Last, Rejoin.LastAt = nil, 0
+        pcall(Config.save, true)
+        local armed, armError = WorldFinder.armTeleport()
+        WorldFinder.log(armed and "Auto-lanjut setelah teleport sudah disiapkan." or armError)
         task.spawn(function()
             local ok, reason = pcall(function()
                 if not waitFor(1.2, live) then return end
-                for index, name in ipairs(queue) do
+                for index = WorldFinder.Index, #queue do
+                    local name = queue[index]
                     if not live() then break end
+                    WorldFinder.Index = index
+                    WorldFinder.checkpoint(true)
                     WorldFinder.log(("Memeriksa %d/%d: %s"):format(index, #queue, name))
                     local entered, message = WorldFinder.warp(name, live)
                     if not live() then break end
@@ -12180,10 +12329,13 @@ do
                     if not live() then break end
                     WorldFinder.record(name, result)
                     if result.kind == "unlocked" then
+                        WorldFinder.checkpoint(false)
                         WorldFinder.log("Ketemu world tanpa lock. Tetap di " .. name .. ".")
                         break
                     end
                     if index < #queue then
+                        WorldFinder.Index = index + 1
+                        WorldFinder.checkpoint(true)
                         local delay = math.max(5, tonumber(WorldFinder.DelaySec) or 8)
                         WorldFinder.log(("Menunggu %d detik, lalu cek %s"):format(delay, queue[index + 1]))
                         if not waitFor(delay, live) then break end
@@ -12192,6 +12344,7 @@ do
             end)
             local finished = live()
             WorldFinder.Running, WorldFinder.Busy, WorldFinder.Saved = false, false, nil
+            WorldFinder.checkpoint(false)
             local foundPreview = {}
             for index = 1, math.min(10, #WorldFinder.FoundNames) do foundPreview[#foundPreview + 1] = WorldFinder.FoundNames[index] end
             if #WorldFinder.FoundNames > 10 then foundPreview[#foundPreview + 1] = "+" .. (#WorldFinder.FoundNames - 10) .. " lainnya" end
@@ -12208,6 +12361,7 @@ do
             end
             if UI.FinderToggle then UI.later("finderOff", function() UI.FinderToggle:Set(false) end) end
         end)
+        return true
     end
 end
 
@@ -12773,8 +12927,8 @@ task.spawn(function()
         if not Guard.On then Guard.set(true) end
     end
     Config.start()
-    -- habis rejoin server: lanjutkan aktivitas sebelumnya
-    Rejoin.startup(reconnect)
+    -- Finder mendapat prioritas supaya catatan rejoin farming tidak memindahkan world lagi.
+    if not WorldFinder.startup(reconnect) then Rejoin.startup(reconnect) end
 end)
 
 task.spawn(function()
@@ -12807,6 +12961,7 @@ end)
 ---------------------------------------------------------------------
 Session.Cleanup = function()
     WorldFinder.Running, WorldFinder.Cancelled = false, true
+    if WorldFinder.checkpoint then WorldFinder.checkpoint(false) end
     AutoDrop.On, AutoDrop.Cancelled = false, true
     State.Running = false
     Clear.Running = false
