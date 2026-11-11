@@ -5,7 +5,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = nama versi l
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-11-auto-drop-collect-1"
+Session.Build = "2026-11-11-n4th-v2-red-1"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -889,6 +889,18 @@ local Anim = { fn = nil, idx = nil, set = nil }
 local DropFailUntil = {}   -- drop yang ditolak, dicoba lagi nanti
 
 local UI = { Tabs = {}, DropdownTabs = {}, PendingDropdowns = {} }
+UI.Palette = {
+    Background = Color3.fromHex("140B10"),
+    Panel = Color3.fromHex("201017"),
+    Surface = Color3.fromHex("2D1720"),
+    Border = Color3.fromHex("69404C"),
+    Text = Color3.fromHex("FFF0F2"),
+    Muted = Color3.fromHex("D7B4BF"),
+    Icon = Color3.fromHex("F9BCC9"),
+    Accent = Color3.fromHex("FA526A"),
+    Action = Color3.fromHex("AA2944"),
+    Stop = Color3.fromHex("702430"),
+}
 function UI.tabVisible(title)
     if not UI.Window then return true end
     if UI.Window.Closed then return false end
@@ -963,6 +975,37 @@ local I18N = { Lang = "id", Saved = "id", Ask = false, Chosen = false }
 do (function() -- fungsi sendiri: variabel di dalam tidak ikut batas 200 local
 
 I18N.EN = {
+    ["Mulai"] = "Home",
+    ["Produksi"] = "Production",
+    ["Alat"] = "Tools",
+    ["Tanam & Panen"] = "Plant & Harvest",
+    ["Pecah Block"] = "Break Blocks",
+    ["Inventori"] = "Inventory",
+    ["Info & Statistik"] = "Info & Stats",
+    ["Umum"] = "General",
+    ["Status sesi"] = "Session status",
+    ["Aktif"] = "Active",
+    ["Tidak ada aktivitas"] = "No activities running",
+    ["Belum masuk world"] = "Outside a world",
+    ["Pilih block dan tile untuk farm"] = "Choose blocks and tiles to farm",
+    ["Pilih seed untuk tanam atau panen"] = "Choose a seed to plant or harvest",
+    ["Pecahkan satu jenis block atau bersihkan world"] = "Break one block type or clear the world",
+    ["Buang item penuh ke tile pilihan"] = "Drop full stacks at a chosen tile",
+    ["Hubungkan game, atur config dan bahasa"] = "Connect to the game and manage config and language",
+    ["Siapkan farm"] = "Farm setup",
+    ["Kecepatan & target"] = "Speed & targets",
+    ["Cara collect"] = "Collection method",
+    ["Atur mode dan area kerja di grid"] = "Choose the farming mode and mark tiles in the grid",
+    ["Bersihkan world"] = "Clear the world",
+    ["Opsi bersihkan world"] = "World clear options",
+    ["Mulai tanam & panen"] = "Start planting & harvesting",
+    ["Statistik sesi"] = "Session stats",
+    ["Scan world"] = "Scan world",
+    ["Efek & performa"] = "Effects & performance",
+    ["Titik drop bersama"] = "Shared drop point",
+    ["Mulai Auto Drop"] = "Start Auto Drop",
+    ["Pilih tile dulu di Grid Tile (Auto Farm), atau nyalakan Keliling world"] =
+        "Select tiles in Auto Farm's tile grid or turn on Walk around world",
     -- grup sidebar & tab
     ["Fitur"] = "Features", ["Keamanan"] = "Security", ["Setelan"] = "Setup",
     ["Pengaturan"] = "Settings", ["Penjaga"] = "Guard", ["Statistik"] = "Stats", ["Tas"] = "Bag",
@@ -1086,17 +1129,17 @@ I18N.EN = {
     ["Kirim hasil ke Discord"] = "Send results to Discord", ["Kirim world yang ditemukan dan ringkasan pencarian"] = "Send worlds found and the search summary",
     ["Kirim setiap hasil"] = "Send every result", ["Sertakan kandidat terkunci dan yang gagal diperiksa"] = "Include locked candidates and failed checks",
     ["Tes notifikasi"] = "Test notification", ["Kirim pesan percobaan ke Discord"] = "Send a test message to Discord",
-    ["Seed sudah banyak: jeda, drop ke titik drop (tab Titik Drop), balik ke posisi farm"] =
-        "Too many seeds: pause, drop at the drop point (Drop Point tab), return to farm position",
+    ["Seed sudah banyak: jeda, drop ke titik drop (Auto Drop → Titik drop bersama), balik ke posisi farm"] =
+        "Too many seeds: pause, drop at the drop point (Auto Drop → Shared drop point), return to farm position",
     ["Seed dari block yang dipilih"] = "Seeds of the selected block",
     ["Drop kalau hampir penuh"] = "Drop when almost full",
-    ["Hasil panen (block & seed) dibawa ke titik drop (tab Titik Drop)"] =
-        "Harvest items (blocks & seeds) are taken to the drop point (Drop Point tab)",
+    ["Hasil panen (block & seed) dibawa ke titik drop (Auto Drop → Titik drop bersama)"] =
+        "Harvest items (blocks & seeds) are taken to the drop point (Auto Drop → Shared drop point)",
     ["Drop kalau item sudah"] = "Drop when an item reaches",
     ["Maksimal 200 per item"] = "Max 200 per item",
     ["Sisakan seed tanam"] = "Seeds to keep for planting",
     ["Seed yang dipilih untuk ditanam tidak di-drop semua"] = "The planting seed is not dropped completely",
-    ["Ke titik drop (tab Titik Drop)"] = "To the drop point (Drop Point tab)",
+    ["Ke titik drop (Auto Drop → Titik drop bersama)"] = "To the drop point (Auto Drop → Shared drop point)",
     ["Block kurang diproduksi dulu, lalu dipasang dari atas seperti ular (tanpa pijakan)"] =
         "Missing blocks are produced first, then placed from the top like a snake (no scaffolding)",
     ["Gali dulu dari permukaan sampai bawah, lalu pasang baris naik sampai atas (baris jadi jembatan). Block habis: produksi 1 baris"] =
@@ -1531,7 +1574,7 @@ I18N.PH = {
     { "gagal masuk", "failed to enter" }, { "nama world tidak diketahui", "unknown world name" },
     { "tidak bisa ke server", "can't reach the server" }, { "tunggu", "wait" },
     { "world penuh / dikunci / gagal", "world full / locked / failed" }, { "aman", "safe" }, { "Fase", "Phase" },
-    { "Titik drop belum diatur (tab Titik Drop), drop dilewati", "Drop point not set (Drop Point tab), drop skipped" },
+    { "Titik drop belum diatur (Auto Drop → Titik drop bersama), drop dilewati", "Drop point not set (Auto Drop → Shared drop point), drop skipped" },
     { "Ambil hasil panen...", "Picking up harvest..." }, { "Lanjut Auto Farm", "Resuming Auto Farm" },
     { "Auto Farm dihentikan", "Auto Farm stopped" }, { "Gagal pulang ke world farmer", "Failed to return to farmer world" },
     { "Gagal pulang ke world farm", "Failed to return to farm world" },
@@ -1903,7 +1946,7 @@ do
 end
 
 ---------------------------------------------------------------------
--- STATISTIK SESI & NOTIFIKASI DISCORD (data; tampilan ada di tab Statistik / Discord)
+-- STATISTIK SESI & NOTIFIKASI DISCORD (tampilan di Info & Statistik dan Discord)
 ---------------------------------------------------------------------
 local Stats = { T0 = os.clock(), Gems0 = nil, Items = {}, Base = {} }
 
@@ -2325,7 +2368,7 @@ local function selectSaved(dd, labels, id)
     end
 end
 
--- Refresh 1 dropdown; error dicatat (tampil di tab Koneksi)
+-- Refresh 1 dropdown; error dicatat (tampil di Umum)
 function UI.ddRefresh(dd, labels)
     if not dd then return end
     if not UI.tabVisible(UI.DropdownTabs[dd]) then
@@ -3488,7 +3531,7 @@ local function setRunningVisual()
     if UI.FarmToggle then pcall(function() UI.FarmToggle:Set(State.Running) end) end
     if UI.GridStart and UI.GridMode == "farm" then
         UI.GridStart.Text = State.Running and "STOP" or "START"
-        UI.GridStart.BackgroundColor3 = State.Running and Color3.fromRGB(200, 60, 60) or Color3.fromRGB(46, 160, 90)
+        UI.GridStart.BackgroundColor3 = State.Running and UI.Palette.Stop or UI.Palette.Action
     end
 end
 
@@ -6661,7 +6704,7 @@ local function dropTrip(items, live, say)
     local home = Guard.worldName()
     if name == "" then name = home end
     if Pabrik.DropX < 0 and not door and name == home then
-        say("Titik drop belum diatur (tab Titik Drop), drop dilewati")
+        say("Titik drop belum diatur (Auto Drop → Titik drop bersama), drop dilewati")
         return false, "nopoint"
     end
     Pabrik.Traveling = true
@@ -9122,11 +9165,9 @@ local TextService = game:GetService("TextService")
 local NameFx = { t0 = os.clock() }
 
 local NAME_COLORS = ColorSequence.new({
-    ColorSequenceKeypoint.new(0.00, Color3.fromRGB(170, 90, 255)),  -- ungu
-    ColorSequenceKeypoint.new(0.25, Color3.fromRGB(60, 205, 255)),  -- biru muda
-    ColorSequenceKeypoint.new(0.50, Color3.fromRGB(255, 110, 210)), -- pink
-    ColorSequenceKeypoint.new(0.75, Color3.fromRGB(60, 205, 255)),
-    ColorSequenceKeypoint.new(1.00, Color3.fromRGB(170, 90, 255)),
+    ColorSequenceKeypoint.new(0.00, UI.Palette.Accent),
+    ColorSequenceKeypoint.new(0.50, UI.Palette.Icon),
+    ColorSequenceKeypoint.new(1.00, UI.Palette.Accent),
 })
 local NAME_FONT = Enum.Font.FredokaOne
 
@@ -9262,7 +9303,7 @@ local function makeLabel(holder, size, isTag)
     end
     local st = Instance.new("UIStroke")
     st.Thickness = 2
-    st.Color = Color3.fromRGB(25, 12, 40)
+    st.Color = UI.Palette.Background
     st.Transparency = 0.1
     st.Parent = lb
     local gr = Instance.new("UIGradient")
@@ -9404,12 +9445,12 @@ local gridSize = side * CELL + (side - 1) * GAP
 local Panel = Instance.new("Frame")
 Panel.Size = UDim2.fromOffset(gridSize + 20, gridSize + 96)
 Panel.Position = UDim2.fromOffset(20, 80)
-Panel.BackgroundColor3 = Color3.fromRGB(22, 22, 28)
+Panel.BackgroundColor3 = UI.Palette.Panel
 Panel.BorderSizePixel = 0
 Panel.Parent = GridGui
 Instance.new("UICorner", Panel).CornerRadius = UDim.new(0, 10)
 local pStroke = Instance.new("UIStroke", Panel)
-pStroke.Color = Color3.fromRGB(70, 70, 90)
+pStroke.Color = UI.Palette.Border
 
 local Title = Instance.new("TextLabel")
 Title.Size = UDim2.new(1, -40, 0, 28)
@@ -9418,14 +9459,14 @@ Title.BackgroundTransparency = 1
 Title.Font = Enum.Font.GothamBold
 Title.TextSize = 13
 Title.TextXAlignment = Enum.TextXAlignment.Left
-Title.TextColor3 = Color3.fromRGB(235, 235, 245)
+Title.TextColor3 = UI.Palette.Text
 Title.Text = I18N.T("Grid Tile")
 Title.Parent = Panel
 
 local CloseBtn = Instance.new("TextButton")
 CloseBtn.Size = UDim2.fromOffset(24, 24)
 CloseBtn.Position = UDim2.new(1, -30, 0, 6)
-CloseBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 75)
+CloseBtn.BackgroundColor3 = UI.Palette.Surface
 CloseBtn.Text = "X"
 CloseBtn.Font = Enum.Font.GothamBold
 CloseBtn.TextSize = 12
@@ -9442,9 +9483,9 @@ GridHolder.Position = UDim2.fromOffset(10, 36)
 GridHolder.BackgroundTransparency = 1
 GridHolder.Parent = Panel
 
-local COLOR_OFF = Color3.fromRGB(48, 48, 60)
-local COLOR_ON = Color3.fromRGB(46, 160, 90)
-local COLOR_ME = Color3.fromRGB(60, 110, 220)
+local COLOR_OFF = UI.Palette.Surface
+local COLOR_ON = UI.Palette.Action
+local COLOR_ME = UI.Palette.Border
 local CellButtons = {}
 
 -- Grid berbagi mode Farm, Pabrik, Lahan, dan satu posisi Auto Drop.
@@ -9531,7 +9572,7 @@ ClearBtn.Position = UDim2.new(0, 10, 1, -22)
 ClearBtn.BackgroundTransparency = 1
 ClearBtn.Font = Enum.Font.Gotham
 ClearBtn.TextSize = 12
-ClearBtn.TextColor3 = Color3.fromRGB(180, 180, 195)
+ClearBtn.TextColor3 = UI.Palette.Muted
 ClearBtn.Text = I18N.T("Bersihkan pilihan")
 ClearBtn.Parent = Panel
 ClearBtn.MouseButton1Click:Connect(function()
@@ -9569,8 +9610,8 @@ do (function()
         local lah = UI.GridMode == "lahan"
         local drop = UI.GridMode == "autodrop"
         ModeBtn.Text = lah and I18N.T("Lahan") or (pab and I18N.T("Pabrik") or "Farm")
-        ModeBtn.BackgroundColor3 = lah and Color3.fromRGB(60, 140, 200)
-            or (pab and Color3.fromRGB(200, 120, 40) or Color3.fromRGB(60, 60, 75))
+        ModeBtn.BackgroundColor3 = lah and UI.Palette.Stop
+            or (pab and UI.Palette.Action or UI.Palette.Surface)
         Title.Text = I18N.T(lah and "Tile Break Lahan" or (pab and "Tile Break Pabrik" or "Grid Tile"))
         if drop then
             ModeBtn.Text = "Drop"
@@ -9582,14 +9623,14 @@ do (function()
             GridStart.BackgroundColor3 = COLOR_ON
         elseif lah then
             GridStart.Text = I18N.T(Build.Running and "STOP LAHAN" or "START LAHAN")
-            GridStart.BackgroundColor3 = Build.Running and Color3.fromRGB(200, 60, 60) or COLOR_ON
+            GridStart.BackgroundColor3 = Build.Running and UI.Palette.Stop or COLOR_ON
         elseif pab then
             GridStart.Text = I18N.T(Pabrik.Running and "STOP PABRIK" or "START PABRIK")
-            GridStart.BackgroundColor3 = Pabrik.Running and Color3.fromRGB(200, 60, 60) or COLOR_ON
+            GridStart.BackgroundColor3 = Pabrik.Running and UI.Palette.Stop or COLOR_ON
         else
             local run = State.Running and not State.Override
             GridStart.Text = run and "STOP" or "START"
-            GridStart.BackgroundColor3 = run and Color3.fromRGB(200, 60, 60) or COLOR_ON
+            GridStart.BackgroundColor3 = run and UI.Palette.Stop or COLOR_ON
         end
     end
 
@@ -9654,7 +9695,7 @@ local function flyButton(text, yOffset, onHold)
     b.Size = UDim2.fromOffset(64, 64)
     b.AnchorPoint = Vector2.new(1, 0.5)
     b.Position = UDim2.new(1, -24, 0.5, yOffset)
-    b.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
+    b.BackgroundColor3 = UI.Palette.Panel
     b.BackgroundTransparency = 0.2
     b.Text = text
     b.Font = Enum.Font.GothamBold
@@ -9664,7 +9705,7 @@ local function flyButton(text, yOffset, onHold)
     b.Parent = FlyPad
     Instance.new("UICorner", b).CornerRadius = UDim.new(1, 0)
     local st = Instance.new("UIStroke", b)
-    st.Color = Color3.fromRGB(90, 90, 120)
+    st.Color = UI.Palette.Border
     st.Thickness = 2
     -- dilepas saat jari diangkat (walau sudah geser keluar), supaya tidak nyangkut
     local heldInput = nil
@@ -9692,6 +9733,31 @@ flyButton("▼", 40, function(v) Misc.DownHeld = v end)
 ---------------------------------------------------------------------
 -- UI WINDUI
 ---------------------------------------------------------------------
+do
+    local p = UI.Palette
+    local theme = table.clone(WindUI:GetThemes().Dark)
+    for key, color in pairs({
+        Accent = p.Panel, Dialog = p.Panel, Background = p.Background,
+        Outline = p.Border, Text = p.Text, Placeholder = p.Muted, Icon = p.Icon,
+        Primary = p.Action, Button = p.Border, Toggle = p.Accent, Slider = p.Accent,
+        Checkbox = p.Action, SliderIcon = p.Icon, WindowTopbarIcon = p.Accent,
+        PanelBackground = p.Panel, PanelBackgroundTransparency = 0,
+        ElementBackground = p.Surface, ElementBackgroundHover = p.Stop, ElementDesc = p.Muted,
+        LabelBackground = p.Background, DropdownBackground = p.Panel, DropdownTabBackground = p.Surface,
+        TabBackgroundHover = p.Surface, TabBackgroundHoverTransparency = 0,
+        TabBackgroundActive = p.Stop, TabBackgroundActiveTransparency = 0,
+        TabBorder = p.Border, DropdownTabBorder = p.Border,
+        SectionBoxBackground = p.Panel, SectionBoxBackgroundTransparency = 0, SectionBoxBorder = p.Border,
+        Tooltip = p.Surface,
+    }) do
+        theme[key] = color
+    end
+    theme.Name = "n4th Red"
+    WindUI:AddTheme(theme)
+    WindUI:SetTheme(theme.Name)
+    pcall(function() WindUI:SetFont(Font.fromEnum(Enum.Font.Roboto).Family) end)
+end
+
 -- Pilih bahasa saat execute (sebelum menu dibuat, karena teks menu dipasang sekali)
 do (function()
     if I18N.TeleportResume or (I18N.Chosen and not I18N.Ask) then
@@ -9732,12 +9798,14 @@ Session.InitStep = "membuat menu WindUI"
 local Window = I18N.wrap(WindUI:CreateWindow({
     Title = "n4th",
     Icon = "sprout",
-    Author = "v5.9.0 | Tester",
+    Author = "v2.0",
     Folder = "n4thOpus",
-    Size = UDim2.fromOffset(640, 380),
-    Theme = "Dark",
-    Transparent = true,
-    SideBarWidth = 150,
+    Size = UDim2.fromOffset(668, 444),
+    MinSize = Vector2.new(485, 330),
+    Theme = "n4th Red",
+    Transparent = false,
+    SideBarWidth = 166,
+    ElementsRadius = 10,
     ToggleKey = Enum.KeyCode.Insert,  -- PC: tekan Insert untuk buka/tutup menu
 }))
 UI.Window = Window
@@ -9745,8 +9813,9 @@ UI.Window = Window
 -- Cadangan PC: kalau tombol susah dicari, tekan Insert.
 pcall(function()
     Window:EditOpenButton({
-        Title = "n4th",
+        Title = "n4th v2.0",
         Icon = "sprout",
+        Color = ColorSequence.new(UI.Palette.Accent, UI.Palette.Action),
         Draggable = true,
         OnlyMobile = false,
     })
@@ -9758,28 +9827,67 @@ local function safe(fn)
     if not ok then warn("[n4th] UI error: " .. tostring(err)) end
 end
 
--- Sidebar dikelompokkan: grup utama bisa dibuka / ditutup (isinya tab-tab)
-local Groups = {}
-for _, g in ipairs({
-    { key = "farm", title = "Farming", icon = "sprout", opened = true },
-    { key = "fitur", title = "Fitur", icon = "sparkles" },
-    { key = "aman", title = "Keamanan", icon = "shield" },
-    { key = "setel", title = "Setelan", icon = "settings" },
-}) do
-    local ok, sec = pcall(function()
-        return Window:Section({ Title = g.title, Icon = g.icon, Opened = g.opened == true })
+-- Kunci tab dipakai oleh refresh inventori. Judul menu bisa diterjemahkan.
+do
+    local shortcuts = {}
+    for _, group in ipairs({
+        { Tabs = {
+            { "Mulai", "Mulai", "house" },
+        } },
+        { Title = "Farming", Icon = "sprout", Opened = true, Tabs = {
+            { "Farm", "Auto Farm", "pickaxe", "Pilih block dan tile untuk farm" },
+            { "Farmer", "Tanam & Panen", "leaf", "Pilih seed untuk tanam atau panen" },
+            { "Clear World", "Pecah Block", "eraser", "Pecahkan satu jenis block atau bersihkan world" },
+            { "Auto Drop", "Auto Drop", "package-open", "Buang item penuh ke tile pilihan" },
+        } },
+        { Title = "Produksi", Icon = "factory", Tabs = {
+            { "Splice", "Splice", "git-merge" },
+            { "Lahan", "Bangun Lahan", "layout-grid" },
+            { "Pabrik", "Pabrik", "factory" },
+            { "Vending", "Vending", "store" },
+        } },
+        { Title = "Alat", Icon = "wrench", Tabs = {
+            { "World Finder", "World Finder", "globe" },
+            { "Tas", "Inventori", "backpack" },
+            { "Growscan", "Info & Statistik", "scan-search" },
+            { "Bonus", "Bonus", "gift" },
+            { "Auto Chat", "Auto Chat", "message-circle" },
+        } },
+        { Title = "Setelan", Icon = "settings", Tabs = {
+            { "Pengaturan", "Umum", "sliders-horizontal", "Hubungkan game, atur config dan bahasa" },
+            { "Penjaga", "Penjaga", "shield" },
+            { "Discord", "Discord", "bell" },
+        } },
+    }) do
+        local parent = Window
+        if group.Title then
+            safe(function()
+                local section = Window:Section({ Title = group.Title, Icon = group.Icon, Opened = group.Opened == true })
+                if section and type(section.Tab) == "function" then parent = section end
+            end)
+        end
+        for _, spec in ipairs(group.Tabs) do
+            local key, title, icon, shortcut = table.unpack(spec)
+            local ok, tab = pcall(function() return parent:Tab({ Title = title, Icon = icon }) end)
+            if not ok or not tab then tab = Window:Tab({ Title = title }) end
+            UI.Tabs[key] = tab
+            if shortcut then shortcuts[#shortcuts + 1] = { tab, parent, title, icon, shortcut } end
+        end
+    end
+
+    safe(function()
+        local home = UI.Tabs.Mulai
+        UI.HomeStatus = home:Paragraph({ Title = "Status sesi", Desc = "-" })
+        for _, spec in ipairs(shortcuts) do
+            local tab, parent, title, icon, desc = table.unpack(spec)
+            home:Button({ Title = title, Icon = icon, Desc = desc, Callback = function()
+                if parent ~= Window and type(parent.Open) == "function" and not parent.Opened then parent:Open() end
+                Window:SelectTab(tab.Index)
+            end })
+        end
+        Window:SelectTab(home.Index)
     end)
-    if ok and type(sec) == "table" and type(sec.Tab) == "function" then Groups[g.key] = sec end
 end
-
-local function makeTab(title, icon, group)
-    local parent = (group and Groups[group]) or Window
-    local ok, tab = pcall(function() return parent:Tab({ Title = title, Icon = icon }) end)
-    if not ok or not tab then tab = Window:Tab({ Title = title }) end
-    UI.Tabs[title] = tab
-    return tab
-end
-
 -- Kotak di dalam tab yang bisa dibuka / ditutup (supaya tab tidak terlihat penuh).
 -- WindUI lama tanpa fitur ini: cuma judul, elemen tetap di tab.
 local function box(tab, title, opened)
@@ -9822,68 +9930,129 @@ local function addNumber(tab, o)
 end
 
 -- ===== TAB: FARM =====
-local FarmTab = makeTab("Farm", "pickaxe", "farm")
+local FarmTab = UI.Tabs["Farm"]
 
 safe(function()
     UI.Status = FarmTab:Paragraph({ Title = "Status", Desc = "-" })
 end)
 
-Box.FarmCtl = box(FarmTab, "Kontrol", true)
-Box.FarmBlock = box(FarmTab, "Block", true)
-Box.FarmSpeed = box(FarmTab, "Mode & Kecepatan", false)
+do
+    local controls = box(FarmTab, "Siapkan farm", true)
+    local collect = box(FarmTab, "Cara collect", false)
+    local speed = box(FarmTab, "Kecepatan & target", false)
 
-safe(function()
-    UI.FarmToggle = Box.FarmCtl:Toggle({
-        Title = "Auto Farm",
-        Desc = "Bisa juga lewat tombol START di Grid",
-        Value = false,
-        Callback = function(on)
-            if on then startFarm() elseif State.Running then stopFarm() end
-        end,
+    safe(function()
+        controls:Dropdown({
+            Title = "Mode",
+            Desc = "Atur mode dan area kerja di grid",
+            Values = { "Place + Break", "Break saja", "Place saja" },
+            Value = State.Mode,
+            Callback = function(opt) State.Mode = opt end,
+        })
+    end)
+
+    safe(function()
+        UI.InvDropdown = controls:Dropdown({
+            Title = "Pilih Block",
+            Desc = "Hanya item yang bisa di-place",
+            Values = { "(memuat...)" },
+            Callback = function(opt)
+                local id = tonumber(string.match(opt or "", "%[(%d+)%]$"))
+                if id then
+                    State.SelectedId = id
+                    updateStatus()
+                end
+            end,
+        })
+    end)
+
+    safe(function()
+        controls:Button({
+            Title = "Refresh daftar",
+            Callback = function() UI.later("invForce", function() doInvRefresh(true) end) end,
+        })
+    end)
+
+    safe(function()
+        controls:Button({
+            Title = "Buka Grid Tile",
+            Desc = "Kotak 5x5, tengah = karakter",
+            Callback = function() UI.setGridMode("farm") GridGui.Enabled = true end,
+        })
+    end)
+
+    safe(function()
+        controls:Toggle({
+            Title = "Auto Collect",
+            Desc = "Ambil drop di semua tile grid (caranya ikut Mode collect)",
+            Value = State.AutoCollect,
+            Callback = function(on) State.AutoCollect = on end,
+        })
+    end)
+
+    safe(function()
+        UI.FarmToggle = controls:Toggle({
+            Title = "Auto Farm",
+            Desc = "Bisa juga lewat tombol START di Grid",
+            Value = false,
+            Callback = function(on)
+                if on then startFarm() elseif State.Running then stopFarm() end
+            end,
+        })
+    end)
+
+    safe(function()
+        collect:Dropdown({
+            Title = "Mode collect",
+            Desc = "Berlaku untuk semua fitur. Sentuhan = seperti main manual. Remote = ambil dari jauh (cara lama, cepat)",
+            Values = { "Sentuhan", "Remote" },
+            Value = State.CollectMode,
+            Callback = function(v)
+                if type(v) == "table" then v = v[1] end
+                if v == "Sentuhan" or v == "Remote" then State.CollectMode = v end
+            end,
+        })
+    end)
+
+    addNumber(collect, {
+        Title = "Radius collect (mode Remote)",
+        Desc = "Jarak ambil drop di sekitar karakter (tile)",
+        Min = 1, Max = 5, Step = 1, Default = State.CollectRadius,
+        Callback = function(v) State.CollectRadius = math.floor(v) end,
     })
-end)
 
-safe(function()
-    Box.FarmCtl:Toggle({
-        Title = "Auto Collect",
-        Desc = "Ambil drop di semua tile grid (caranya ikut Mode collect)",
-        Value = State.AutoCollect,
-        Callback = function(on) State.AutoCollect = on end,
+    addNumber(speed, {
+        Title = "Speed Place (ms)",
+        Desc = "Jeda setelah tiap place",
+        Min = 140, Max = 1000, Step = 10, Default = State.PlaceMs,
+        Callback = function(v) State.PlaceMs = math.floor(v) end,
     })
-end)
 
-safe(function()
-    Box.FarmCtl:Dropdown({
-        Title = "Mode collect",
-        Desc = "Berlaku untuk semua fitur. Sentuhan = seperti main manual. Remote = ambil dari jauh (cara lama, cepat)",
-        Values = { "Sentuhan", "Remote" },
-        Value = State.CollectMode,
-        Callback = function(v)
-            if type(v) == "table" then v = v[1] end
-            if v == "Sentuhan" or v == "Remote" then State.CollectMode = v end
-        end,
+    addNumber(speed, {
+        Title = "Speed Break (ms)",
+        Desc = "Jeda tiap pukulan (normal 220). Dipakai juga Clear",
+        Min = 200, Max = 1000, Step = 10, Default = State.BreakMs,
+        Callback = function(v) State.BreakMs = math.floor(v) end,
     })
-end)
 
-addNumber(Box.FarmCtl, {
-    Title = "Radius collect (mode Remote)",
-    Desc = "Jarak ambil drop di sekitar karakter (tile)",
-    Min = 1, Max = 5, Step = 1, Default = State.CollectRadius,
-    Callback = function(v) State.CollectRadius = math.floor(v) end,
-})
-
-
-safe(function()
-    Box.FarmCtl:Button({
-        Title = "Buka Grid Tile",
-        Desc = "Kotak 5x5, tengah = karakter",
-        Callback = function() UI.setGridMode("farm") GridGui.Enabled = true end,
+    addNumber(speed, {
+        Title = "Multi target break",
+        Desc = "Auto Farm: tile dipukul bergantian (seperti 2 jari). Pakai Rayman's Fist = 2-3 tile segaris sekali pukul",
+        Min = 1, Max = 5, Step = 1, Default = State.MultiTarget,
+        Callback = function(v) State.MultiTarget = math.clamp(math.floor(v), 1, 5) end,
     })
-end)
+
+    addNumber(speed, {
+        Title = "Jeda setelah hancur (ms)",
+        Desc = "Tunggu sebelum lanjut ke tile berikutnya",
+        Min = 0, Max = 1500, Step = 50, Default = State.AfterBreakMs,
+        Callback = function(v) State.AfterBreakMs = math.floor(v) end,
+    })
+end
 
 -- ===== AUTO BREAK BLOCK: jenis block dari foreground world aktif =====
 do (function()
-    local controls = box(FarmTab, "Auto Break Block", true)
+    local controls = box(UI.Tabs["Clear World"], "Auto Break Block", true)
     local signature, lastWorld, lastGrid, lastName, lastWidth, lastHeight, refreshedAt
     safe(function() UI.WorldBreakStatus = controls:Paragraph({ Title = "Status Auto Break", Desc = "Pilih block dari world, lalu nyalakan Auto Break Block." }) end)
     safe(function()
@@ -9913,7 +10082,7 @@ do (function()
         local sameWorld = w == lastWorld and grid == lastGrid and name == lastName and width == lastWidth and height == lastHeight
         -- Jangan scan dunia pada tab tersembunyi atau selama target break terkunci.
         if not force and signature and sameWorld then
-            if Clear.Running or Window.Closed or not FarmTab.Selected or os.clock() - (refreshedAt or 0) < 8 then return end
+            if Clear.Running or not UI.tabVisible("Clear World") or os.clock() - (refreshedAt or 0) < 8 then return end
         end
         local ids, counts = Auto.worldBreakOptions(true)
         if Refs.World ~= w or (w and w.fg ~= grid) then return end
@@ -9972,15 +10141,15 @@ end)() end
 
 -- ===== TAB: AUTO DROP =====
 do (function()
-    local tab = makeTab("Auto Drop", "package-open", "farm")
+    local tab = UI.Tabs["Auto Drop"]
     safe(function() UI.AutoDropStatus = tab:Paragraph({ Title = "Status", Desc = "-" }) end)
-    local controls = box(tab, "Kontrol", true)
-    local itemBox = box(tab, "Item", true)
+    local itemBox = box(tab, "Pilih item", true)
     local pointBox = box(tab, "Atur titik drop", true)
+    local controls = box(tab, "Mulai Auto Drop", true)
 
     safe(function()
         UI.AutoDropToggle = controls:Toggle({
-            Title = "Pantau item penuh",
+            Title = "Auto Drop",
             Desc = "Item mencapai 200 lalu dibawa ke tile drop. Setelah itu kembali dan lanjut farming.",
             Value = false,
             Callback = function(on)
@@ -10110,14 +10279,14 @@ do (function()
 end)() end
 
 -- ===== TAB: CLEAR WORLD =====
-local ClearTab = makeTab("Clear World", "eraser", "farm")
+local ClearTab = UI.Tabs["Clear World"]
+
+Box.ClearCtl = box(ClearTab, "Bersihkan world", false)
+Box.ClearSet = box(ClearTab, "Opsi bersihkan world", false)
 
 safe(function()
-    UI.ClearStatus = ClearTab:Paragraph({ Title = "Status Clear", Desc = "-" })
+    UI.ClearStatus = Box.ClearCtl:Paragraph({ Title = "Status Clear", Desc = "-" })
 end)
-
-Box.ClearCtl = box(ClearTab, "Kontrol", true)
-Box.ClearSet = box(ClearTab, "Pengaturan", false)
 
 safe(function()
     UI.ClearToggle = Box.ClearCtl:Toggle({
@@ -10191,27 +10360,16 @@ safe(function()
 end)
 
 -- ===== TAB: FARMER =====
-local FarmerTab = makeTab("Farmer", "leaf", "farm")
+local FarmerTab = UI.Tabs["Farmer"]
 
 safe(function()
     UI.FarmerStatus = FarmerTab:Paragraph({ Title = "Status Farmer", Desc = "-" })
 end)
 
-Box.FarmerCtl = box(FarmerTab, "Kontrol", true)
 Box.FarmerSeed = box(FarmerTab, "Seed", true)
+Box.FarmerCtl = box(FarmerTab, "Mulai tanam & panen", true)
 Box.FarmerSpeed = box(FarmerTab, "Kecepatan", false)
 Box.FarmerBlock = box(FarmerTab, "Block pijakan", false)
-
-safe(function()
-    UI.FarmerToggle = Box.FarmerCtl:Toggle({
-        Title = "Jalankan Farmer",
-        Desc = "Panen pohon siap & tanam seed otomatis",
-        Value = false,
-        Callback = function(on)
-            if on then Auto.startFarmer() elseif Farmer.Running then stopFarmer() end
-        end,
-    })
-end)
 
 safe(function()
     UI.SeedDropdown = Box.FarmerSeed:Dropdown({
@@ -10263,6 +10421,17 @@ safe(function()
     })
 end)
 
+safe(function()
+    UI.FarmerToggle = Box.FarmerCtl:Toggle({
+        Title = "Jalankan Farmer",
+        Desc = "Panen pohon siap & tanam seed otomatis",
+        Value = false,
+        Callback = function(on)
+            if on then Auto.startFarmer() elseif Farmer.Running then stopFarmer() end
+        end,
+    })
+end)
+
 addNumber(Box.FarmerSpeed, {
     Title = "Speed Harvest (ms)",
     Desc = "Jeda setelah tiap panen",
@@ -10304,154 +10473,8 @@ safe(function()
     })
 end)
 
--- ===== FARM: MODE & KECEPATAN =====
-local SpeedTab = Box.FarmSpeed -- digabung ke tab Farm
-
-safe(function()
-    SpeedTab:Dropdown({
-        Title = "Mode",
-        Desc = "Place semua tile dulu, lalu break",
-        Values = { "Place + Break", "Break saja", "Place saja" },
-        Value = State.Mode,
-        Callback = function(opt) State.Mode = opt end,
-    })
-end)
-
-addNumber(SpeedTab, {
-    Title = "Speed Place (ms)",
-    Desc = "Jeda setelah tiap place",
-    Min = 140, Max = 1000, Step = 10, Default = State.PlaceMs,
-    Callback = function(v) State.PlaceMs = math.floor(v) end,
-})
-
-addNumber(SpeedTab, {
-    Title = "Speed Break (ms)",
-    Desc = "Jeda tiap pukulan (normal 220). Dipakai juga Clear",
-    Min = 200, Max = 1000, Step = 10, Default = State.BreakMs,
-    Callback = function(v) State.BreakMs = math.floor(v) end,
-})
-
-addNumber(SpeedTab, {
-    Title = "Multi target break",
-    Desc = "Auto Farm: tile dipukul bergantian (seperti 2 jari). Pakai Rayman's Fist = 2-3 tile segaris sekali pukul",
-    Min = 1, Max = 5, Step = 1, Default = State.MultiTarget,
-    Callback = function(v) State.MultiTarget = math.clamp(math.floor(v), 1, 5) end,
-})
-
-addNumber(SpeedTab, {
-    Title = "Jeda setelah hancur (ms)",
-    Desc = "Tunggu sebelum lanjut ke tile berikutnya",
-    Min = 0, Max = 1500, Step = 50, Default = State.AfterBreakMs,
-    Callback = function(v) State.AfterBreakMs = math.floor(v) end,
-})
-
--- ===== TAB: PENGATURAN (Opsi + Misc digabung) =====
-local SetTab = makeTab("Pengaturan", "sliders-horizontal", "setel")
-Box.SetChar = box(SetTab, "Karakter", true)
-Box.SetOpt = box(SetTab, "Opsi", true)
-local OptTab = Box.SetOpt
-
-safe(function()
-    OptTab:Toggle({
-        Title = "Mode Lite",
-        Desc = "Matikan particle & suara (HP low-end)",
-        Value = State.LiteMode,
-        Callback = function(on) setLite(on) end,
-    })
-end)
-
-safe(function()
-    OptTab:Toggle({
-        Title = "Mute suara pukulan",
-        Value = State.MutePunch,
-        Callback = function(on) State.MutePunch = on end,
-    })
-end)
-
-safe(function()
-    OptTab:Toggle({
-        Title = "Animasi aksi",
-        Desc = "Tangan bergerak saat break / place / tanam / panen + efek place. Matikan untuk hemat FPS",
-        Value = State.Visual,
-        Callback = function(on)
-            State.Visual = on
-            if on and not Anim.fn and Refs.World then
-                notify("Animasi", "Fungsi animasi game tidak ketemu (tekan 'Hubungkan ke game')", 4)
-            end
-        end,
-    })
-end)
-
-safe(function()
-    OptTab:Toggle({
-        Title = "Anti AFK",
-        Value = State.AntiAfk,
-        Callback = function(on) State.AntiAfk = on end,
-    })
-end)
-
-addNumber(OptTab, {
-    Title = "Pukulan per block (cadangan)",
-    Desc = "Dipakai kalau 'Pukul: TIDAK'. 0 = otomatis",
-    Min = 0, Max = 20, Step = 1, Default = State.HitsOverride,
-    Callback = function(v) State.HitsOverride = math.floor(v) end,
-})
-
--- ===== FARM: PILIH BLOCK =====
-local InvTab = Box.FarmBlock -- digabung ke tab Farm
-
-safe(function()
-    UI.InvDropdown = InvTab:Dropdown({
-        Title = "Pilih Block",
-        Desc = "Hanya item yang bisa di-place",
-        Values = { "(memuat...)" },
-        Callback = function(opt)
-            local id = tonumber(string.match(opt or "", "%[(%d+)%]$"))
-            if id then
-                State.SelectedId = id
-                updateStatus()
-            end
-        end,
-    })
-end)
-
-safe(function()
-    InvTab:Button({
-        Title = "Refresh daftar",
-        Callback = function() UI.later("invForce", function() doInvRefresh(true) end) end,
-    })
-end)
-
--- ===== PENGATURAN: KARAKTER =====
-local MiscTab = Box.SetChar
-
-addNumber(MiscTab, {
-    Title = "Walkspeed (%)",
-    Desc = "100 = normal",
-    Min = 50, Max = 500, Step = 10, Default = Misc.Speed,
-    Callback = function(v) setSpeed(v) end,
-})
-
-safe(function()
-    MiscTab:Toggle({
-        Title = "Infinite Jump",
-        Desc = "Lompat di udara (bisa kena rollback)",
-        Value = false,
-        Callback = function(on) setInfJump(on) end,
-    })
-end)
-
-safe(function()
-    UI.GhostToggle = MiscTab:Toggle({
-        Title = "Fly + Tembus Block",
-        Desc = "Tembus block, pakai tombol ▲/▼ (bisa kena rollback)",
-        Value = false,
-        Callback = function(on) setGhost(on) end,
-    })
-end)
-
 -- ===== TAB: AUTO CHAT =====
-local ChatTab = makeTab("Auto Chat", "message-circle", "fitur")
+local ChatTab = UI.Tabs["Auto Chat"]
 
 safe(function()
     UI.SpamStatus = ChatTab:Paragraph({ Title = "Status Chat", Desc = "-" })
@@ -10977,7 +11000,7 @@ Config.add("Penjaga", Guard, { "On", "Who", "StopAll", "Leave", "AutoBack", "Bac
 
 -- ===== TAB: PENJAGA =====
 do (function() -- fungsi sendiri: variabel di dalam tidak ikut batas 200 local
-    local GuardTab = makeTab("Penjaga", "eye", "aman")
+    local GuardTab = UI.Tabs["Penjaga"]
 
     safe(function()
         UI.GuardStatus = GuardTab:Paragraph({ Title = "Status Penjaga", Desc = "Mati" })
@@ -11241,7 +11264,7 @@ Config.add("Bonus", Bonus, { "Quest", "Redeem" })
 
 -- ===== TAB: BONUS =====
 do (function() -- fungsi sendiri: variabel di dalam tidak ikut batas 200 local
-    local BonusTab = makeTab("Bonus", "gift", "fitur")
+    local BonusTab = UI.Tabs["Bonus"]
     local bQuest = box(BonusTab, "Quest Harian", true)
     local bCode = box(BonusTab, "Redeem Code", true)
 
@@ -11531,16 +11554,16 @@ Config.add("Growscan", Scan, { "Auto", "Layer" })
 
 -- ===== TAB: GROWSCAN =====
 do (function() -- fungsi sendiri: variabel di dalam tidak ikut batas 200 local
-    local ScanTab = makeTab("Growscan", "scan-search", "fitur")
+    local ScanTab = UI.Tabs["Growscan"]
+    Box.SessionStats = box(ScanTab, "Statistik sesi", true)
+    local sCtl = box(ScanTab, "Scan world", false)
+    local sFloat = box(ScanTab, "Floating Items", false)
+    local sBlock = box(ScanTab, "World Blocks", false)
+    local sTree = box(ScanTab, "Pohon (siap panen)", false)
 
     safe(function()
-        UI.ScanInfo = ScanTab:Paragraph({ Title = "Info World", Desc = "Tekan Scan sekarang" })
+        UI.ScanInfo = sCtl:Paragraph({ Title = "Info World", Desc = "Tekan Scan sekarang" })
     end)
-
-    local sCtl = box(ScanTab, "Kontrol", true)
-    local sFloat = box(ScanTab, "Floating Items", true)
-    local sBlock = box(ScanTab, "World Blocks", false)
-    local sTree = box(ScanTab, "Pohon (siap panen)", true)
 
     safe(function()
         sCtl:Toggle({
@@ -11702,7 +11725,7 @@ end)() end
 
 -- ===== TAB: STATISTIK =====
 do (function()
-    local StatTab = makeTab("Statistik", "bar-chart-3", "fitur")
+    local StatTab = Box.SessionStats
 
     safe(function()
         UI.StatsText = StatTab:Paragraph({ Title = "Sesi ini", Desc = "-" })
@@ -11876,7 +11899,7 @@ Config.add("Tas", Bag, { "TrashOn", "TrashList", "TrashAt", "Keep", "LockOn" })
 
 -- ===== TAB: TAS =====
 do (function()
-    local BagTab = makeTab("Tas", "backpack", "fitur")
+    local BagTab = UI.Tabs["Tas"]
 
     safe(function()
         UI.BagStatus = BagTab:Paragraph({ Title = "Status", Desc = "-" })
@@ -12075,7 +12098,7 @@ do (function()
         elseif not Splice.result(Splice.A, Splice.B) then
             err = "Kombinasi ini tidak bisa di-splice"
         elseif not Splice.Roam and next(State.Offsets) == nil then
-            err = "Pilih tile dulu di Grid Tile (tab Farm), atau nyalakan Keliling world"
+            err = "Pilih tile dulu di Grid Tile (Auto Farm), atau nyalakan Keliling world"
         elseif State.Running or Clear.Running or Farmer.Running then
             err = "Hentikan Auto Farm / Clear / Farmer dulu"
         end
@@ -12126,7 +12149,7 @@ Splice.Ms = math.max(Splice.Ms, 140)
 
 -- ===== TAB: SPLICE =====
 do (function()
-    local SpTab = makeTab("Splice", "git-merge", "farm")
+    local SpTab = UI.Tabs["Splice"]
 
     safe(function()
         UI.SpliceStatus = SpTab:Paragraph({ Title = "Status Splice", Desc = "-" })
@@ -12230,7 +12253,7 @@ end)() end
 
 -- ===== TAB: LAHAN (bangun farm world) =====
 do (function()
-    local LTab = makeTab("Lahan", "layout-grid", "farm")
+    local LTab = UI.Tabs["Lahan"]
 
     safe(function()
         UI.LahanStatus = LTab:Paragraph({ Title = "Status Lahan", Desc = "-" })
@@ -12399,7 +12422,7 @@ do (function()
             -- tombol START di Grid (mode lahan)
             if UI.GridMode == "lahan" and UI.GridStart then
                 UI.GridStart.Text = I18N.T(Build.Running and "STOP LAHAN" or "START LAHAN")
-                UI.GridStart.BackgroundColor3 = Build.Running and Color3.fromRGB(200, 60, 60) or Color3.fromRGB(46, 160, 90)
+                UI.GridStart.BackgroundColor3 = Build.Running and UI.Palette.Stop or UI.Palette.Action
             end
             task.wait(1)
         end
@@ -12408,7 +12431,7 @@ end)() end
 
 -- ===== TAB: VENDING =====
 do (function()
-    local VTab = makeTab("Vending", "store", "farm")
+    local VTab = UI.Tabs["Vending"]
     function UI.VendVisible() return not Window.Closed and VTab.Selected == true end
 
     safe(function()
@@ -12628,7 +12651,7 @@ end)() end
 
 -- ===== TAB: PABRIK =====
 do (function()
-    local PTab = makeTab("Pabrik", "factory", "farm")
+    local PTab = UI.Tabs["Pabrik"]
 
     safe(function()
         UI.PabrikStatus = PTab:Paragraph({ Title = "Status Pabrik", Desc = "-" })
@@ -12700,7 +12723,7 @@ do (function()
     safe(function()
         pDrop:Toggle({
             Title = "Auto drop seed",
-            Desc = "Ke titik drop (tab Titik Drop)",
+            Desc = "Ke titik drop (Auto Drop → Titik drop bersama)",
             Value = Pabrik.Drop,
             Callback = function(on) Pabrik.Drop = on end,
         })
@@ -12749,7 +12772,7 @@ do (function()
             -- tombol START di Grid (mode pabrik)
             if UI.GridMode == "pabrik" and UI.GridStart then
                 UI.GridStart.Text = I18N.T(Pabrik.Running and "STOP PABRIK" or "START PABRIK")
-                UI.GridStart.BackgroundColor3 = Pabrik.Running and Color3.fromRGB(200, 60, 60) or Color3.fromRGB(46, 160, 90)
+                UI.GridStart.BackgroundColor3 = Pabrik.Running and UI.Palette.Stop or UI.Palette.Action
             end
             task.wait(1)
         end
@@ -13486,7 +13509,7 @@ end
 
 -- ===== TAB: WORLD FINDER =====
 do (function()
-    local tab = makeTab("World Finder", "globe", "fitur")
+    local tab = UI.Tabs["World Finder"]
     safe(function() UI.FinderStatus = tab:Paragraph({ Title = "Proses sekarang", Desc = WorldFinder.Status }) end)
     safe(function() UI.FinderLogs = tab:Paragraph({ Title = "Log terbaru", Desc = "Belum ada proses" }) end)
     safe(function()
@@ -13654,13 +13677,11 @@ end)() end
 
 -- ===== TAB: TITIK DROP (dipakai Pabrik, Farmer, Auto Farm) =====
 do (function()
-    local DTab = makeTab("Titik Drop", "map-pin", "farm")
+    local dBox = box(UI.Tabs["Auto Drop"], "Titik drop bersama", false)
 
     safe(function()
-        UI.DropPointStatus = DTab:Paragraph({ Title = "Titik Drop", Desc = "-" })
+        UI.DropPointStatus = dBox:Paragraph({ Title = "Titik Drop", Desc = "-" })
     end)
-
-    local dBox = box(DTab, "Atur titik drop", true)
 
     safe(function()
         UI.DropWorldInput = dBox:Input({
@@ -13730,18 +13751,16 @@ do (function()
     end)
 end)() end
 
--- ===== TAB: KONEKSI =====
-local ConnTab = makeTab("Koneksi", "plug", "setel")
-
-safe(function()
-    UI.RefInfo = ConnTab:Paragraph({ Title = "Referensi game", Desc = "-" })
-end)
+-- ===== TAB: UMUM =====
+local ConnTab = UI.Tabs.Pengaturan
 
 Box.ConnMain = box(ConnTab, "Koneksi", true)
-Box.ConnCfg = box(ConnTab, "Config", true)
-Box.ConnCalib = box(ConnTab, "Koreksi posisi", false)
+Box.ConnCfg = box(ConnTab, "Config", false)
 Box.ConnLang = box(ConnTab, "Bahasa / Language", false)
 
+safe(function()
+    UI.RefInfo = Box.ConnMain:Paragraph({ Title = "Referensi game", Desc = "-" })
+end)
 local function reconnect(show)
     -- hentikan Clear / Farmer dulu
     if Clear.Running then stopClear("Dihentikan: hubungkan ulang ke game") end
@@ -13847,6 +13866,8 @@ safe(function()
     })
 end)
 
+Box.ConnCalib = box(ConnTab, "Koreksi posisi", false)
+
 safe(function()
     Box.ConnCalib:Input({
         Title = "Koreksi posisi X",
@@ -13945,9 +13966,85 @@ do (function()
     end)
 end)() end
 
+do
+    local character = box(ConnTab, "Karakter", false)
+    local effects = box(ConnTab, "Efek & performa", false)
+
+    addNumber(character, {
+        Title = "Walkspeed (%)",
+        Desc = "100 = normal",
+        Min = 50, Max = 500, Step = 10, Default = Misc.Speed,
+        Callback = function(v) setSpeed(v) end,
+    })
+
+    safe(function()
+        character:Toggle({
+            Title = "Infinite Jump",
+            Desc = "Lompat di udara (bisa kena rollback)",
+            Value = false,
+            Callback = function(on) setInfJump(on) end,
+        })
+    end)
+
+    safe(function()
+        UI.GhostToggle = character:Toggle({
+            Title = "Fly + Tembus Block",
+            Desc = "Tembus block, pakai tombol ▲/▼ (bisa kena rollback)",
+            Value = false,
+            Callback = function(on) setGhost(on) end,
+        })
+    end)
+
+    safe(function()
+        effects:Toggle({
+            Title = "Mode Lite",
+            Desc = "Matikan particle & suara (HP low-end)",
+            Value = State.LiteMode,
+            Callback = function(on) setLite(on) end,
+        })
+    end)
+
+    safe(function()
+        effects:Toggle({
+            Title = "Mute suara pukulan",
+            Value = State.MutePunch,
+            Callback = function(on) State.MutePunch = on end,
+        })
+    end)
+
+    safe(function()
+        effects:Toggle({
+            Title = "Animasi aksi",
+            Desc = "Tangan bergerak saat break / place / tanam / panen + efek place. Matikan untuk hemat FPS",
+            Value = State.Visual,
+            Callback = function(on)
+                State.Visual = on
+                if on and not Anim.fn and Refs.World then
+                    notify("Animasi", "Fungsi animasi game tidak ketemu (tekan 'Hubungkan ke game')", 4)
+                end
+            end,
+        })
+    end)
+
+    safe(function()
+        effects:Toggle({
+            Title = "Anti AFK",
+            Value = State.AntiAfk,
+            Callback = function(on) State.AntiAfk = on end,
+        })
+    end)
+
+    addNumber(effects, {
+        Title = "Pukulan per block (cadangan)",
+        Desc = "Dipakai kalau 'Pukul: TIDAK'. 0 = otomatis",
+        Min = 0, Max = 20, Step = 1, Default = State.HitsOverride,
+        Callback = function(v) State.HitsOverride = math.floor(v) end,
+    })
+end
+
 -- ===== TAB: DISCORD =====
 do (function()
-    local DcTab = makeTab("Discord", "bell", "setel")
+    local DcTab = UI.Tabs["Discord"]
 
     safe(function()
         UI.HookStatus = DcTab:Paragraph({ Title = "Status", Desc = Hook.Status })
@@ -14048,7 +14145,7 @@ task.spawn(function()
     local readyDeadline = os.clock() + 12
     while alive() and LocalPlayer:GetAttribute("GameReady") ~= true and os.clock() < readyDeadline do task.wait(0.25) end
     if not alive() then return end
-    reconnect("n4th v5.2")
+    reconnect("n4th v2.0")
     -- Input dapat tersambung belakangan pada executor yang mulai sebelum client game selesai.
     if not Refs.Punch then
         task.spawn(function()
@@ -14090,6 +14187,26 @@ task.spawn(function()
         Auto.updateClearStatus()
         Auto.updateFarmerStatus()
         updateSpamStatus()
+        if UI.HomeStatus and UI.tabVisible("Mulai") then
+            local world = Guard.worldName()
+            local running = {}
+            for _, activity in ipairs({
+                { State.Running, "Auto Farm" },
+                { Farmer.Running, "Tanam & Panen" },
+                { Clear.Running, Clear.TargetId and "Auto Break Block" or "Auto Clear World" },
+                { AutoDrop.On, "Auto Drop" },
+                { WorldFinder.Running, "World Finder" },
+            }) do
+                if activity[1] then running[#running + 1] = I18N.T(activity[2]) end
+            end
+            local status = world ~= "" and world or I18N.T("Belum masuk world")
+            status ..= "\n" .. (#running > 0 and (I18N.T("Aktif") .. "  " .. table.concat(running, " · "))
+                or I18N.T("Tidak ada aktivitas"))
+            if status ~= UI.HomeShown then
+                UI.HomeShown = status
+                pcall(function() UI.HomeStatus:SetDesc(status) end)
+            end
+        end
         if UI.ConfigStatus and Config.Status ~= Config.Shown then
             Config.Shown = Config.Status
             pcall(function() UI.ConfigStatus:SetDesc(Config.Status) end)
