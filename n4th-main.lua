@@ -5,7 +5,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = nama versi l
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-11-auto-dirt-farm-1"
+Session.Build = "2026-11-11-auto-drop-routing-1"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -976,6 +976,16 @@ local I18N = { Lang = "id", Saved = "id", Ask = false, Chosen = false }
 do (function() -- fungsi sendiri: variabel di dalam tidak ikut batas 200 local
 
 I18N.EN = {
+    ["Menunggu karakter kembali ke pijakan farm"] = "Waiting for the character to return to a stable farm tile",
+    ["Jalan ke titik drop"] = "Walking to the drop point",
+    ["Drop ditunda karena item akan menutup jalur pulang"] = "Drop deferred because the stack would block the way back",
+    ["Mencari jalur pulang yang aman"] = "Finding a safe path back",
+    ["Kedua sisi posisi drop terhalang"] = "Both sides of the drop tile are blocked",
+    ["Posisi drop tidak terjangkau"] = "The drop tile is unreachable",
+    ["Karakter belum berada di tile atau arah drop"] = "The character has not reached the drop tile or is facing the wrong way",
+    ["Jalur pulang aman tidak ditemukan. Auto Drop dihentikan; ubah tile atau arah drop"] =
+        "No safe way back. Auto Drop stopped. Change the drop tile or direction.",
+    ["Arah pilihan dipakai selama jalur pulang aman. Arah bisa dibalik otomatis."] = "The preferred direction is used when the way back is safe. The direction can reverse automatically.",
     ["Jalankan Auto Dirt Farm"] = "Run Auto Dirt Farm",
     ["Buka celah 1 tile, buat tangga di ujung, lalu isi lantai dengan Dirt."] = "Clear a one-tile gap, make stairs at the ends, then fill the floors with Dirt.",
     ["Batas area"] = "Area bounds",
@@ -3890,6 +3900,8 @@ local function astar(sx, sy, goals, gx, gy, R, useBlock, route)
     local w = Refs.World
     if not w then return nil, false, {} end
     local W, H = w.w, w.h
+    local edgeFailures = route and route.badEdges or BadEdge
+    local canContinue = route and route.live or autoOn
     local grid, worldName = w.fg, w.name
     local WH = W * H
     local dxm, dyLo, dyHi = reachOffsets(R)
@@ -4069,7 +4081,7 @@ local function astar(sx, sy, goals, gx, gy, R, useBlock, route)
         -- Batasi waktu CPU, bukan menunggu 400 titik selesai sekaligus.
         if popped % 8 == 0 and os.clock() >= nextSlice then
             task.wait()
-            if not autoOn() or Refs.World ~= w or w.fg ~= grid or w.name ~= worldName then return nil, false, closed end
+            if not canContinue() or Refs.World ~= w or w.fg ~= grid or w.name ~= worldName then return nil, false, closed end
             nextSlice = os.clock() + 0.0015
         end
         local cur
@@ -4092,7 +4104,7 @@ local function astar(sx, sy, goals, gx, gy, R, useBlock, route)
             for k = 1, cnt do
                 local ni = ey[k] * W + ex[k]
                 if not closed[ni] then
-                    local bad = BadEdge[cur * WH + ni]
+                    local bad = edgeFailures[cur * WH + ni]
                     if not (bad and bad > now) then
                         local ng = gc + ec[k]
                         local old = g[ni]
@@ -4161,10 +4173,11 @@ end
 
 local function frame()
     task.wait()
-    if Move.HomingRoute and not Move.HomingRoute.safe(playerState()) then
+    local route = Move.HomingRoute
+    if route and ((route.needsRefresh and route.needsRefresh()) or not route.safe(playerState())) then
         releaseInput()
-        Move.Homing = false
-        return false
+        route.invalidated = true
+        return false -- walkTo menghitung ulang jalur dari posisi terakhir
     end
     return autoOn()
 end
@@ -4452,7 +4465,7 @@ local function execPillar(e)
     return false
 end
 
-local function followPath(path)
+local function followPath(path, badEdges)
     local i = 1
     while i <= #path do
         if not autoOn() then return false end
@@ -4510,8 +4523,19 @@ local function followPath(path)
         end
         releaseInput()
         if not ok then
+            if badEdges and Move.HomingRoute and Move.HomingRoute.invalidated then return false end
             -- hindari jalur ini sementara (tangga cuma sebentar, supaya tidak memutar jauh ke tangga lain)
-            BadEdge[e.key] = os.clock() + ((e.kind == "stair") and 5 or 20)
+            local failures = badEdges or BadEdge
+            if badEdges and last > i then
+                local state = playerState()
+                if state then
+                    local x, y = startNode(state)
+                    for j = i, last do
+                        if path[j].fx == x and path[j].fy == y then e = path[j] break end
+                    end
+                end
+            end
+            failures[e.key] = os.clock() + (badEdges and 2 or ((e.kind == "stair") and 5 or 20))
             return false
         end
         i = last + 1
@@ -6353,37 +6377,61 @@ end
 
 -- Jalan ke 1 tile tertentu (dipakai Penjaga: balik ke posisi Auto Farm).
 -- Pakai A* yang sama, tanpa taruh block.
-local function walkTo(tx, ty, maxSec, live, route)
+local function walkTo(tx, ty, maxSec, live, makeRoute)
     local w = Refs.World
     if not w or not OrigIsDown then return false end
     if tx < 0 or ty < 0 or tx >= w.w or ty >= w.h then return false end
-    if route and not route.point(tx, ty) then return false end
+    local grid = w.fg
     Move.Homing = true
     Move.HomingLive = live
-    Move.HomingRoute = route
     autoBegin()
     local goal = { [ty * w.w + tx] = true }
     local t0, ok = os.clock(), false
-    while alive() and Move.Homing and (not live or live()) and os.clock() - t0 < (maxSec or 30) do
+    local badEdges = makeRoute and {}
+    local misses = 0
+    while alive() and Move.Homing and (not live or live()) and Refs.World == w and w.fg == grid
+        and os.clock() - t0 < (maxSec or 30) do
         local s = playerState()
-        if not s or s.dead then
-            task.wait(0.3) -- tunggu respawn / world selesai dimuat
-        else
-            local sx, sy = startNode(s)
-            if sx == tx and sy == ty and s.grounded then
-                ok = not route or execWalk(tx, ty, 0.08)
+        if not s or s.dead or (makeRoute and not s.grounded) then
+            task.wait(0.15)
+            continue
+        end
+        local sx, sy = startNode(s)
+        local route = makeRoute and makeRoute()
+        if route then
+            route.badEdges, route.live = badEdges, live
+            Move.HomingRoute = route
+        end
+        if sx == tx and sy == ty and s.grounded then
+            if not route then
+                ok = true
                 break
             end
-            local path = astar(sx, sy, goal, tx, ty, 0.5, false, route)
-            if not path then break end -- tidak ada jalan
-            if #path > 0 then followPath(path) end
-            releaseInput()
-            task.wait(0.15)
+            if floor(s.x) == tx and route.safe(s, true) then
+                if abs(s.vx or 0) < 2 then ok = true break end
+                releaseInput()
+                task.wait(0.12)
+                continue
+            end
+            -- startNode bisa memilih pijakan di samping posisi badan.
+            if route.point(tx, ty) and execWalk(tx, ty) then ok = true break end
         end
+        local path
+        if not route or route.point(tx, ty) then path = astar(sx, sy, goal, tx, ty, 0.5, false, route) end
+        if not path or (route and #path == 0) then
+            if not route then break end
+            misses += 1
+            if misses >= 3 then break end
+            -- Coba lagi setelah posisi / daftar drop berubah, tanpa riwayat gagal dari farming.
+            table.clear(badEdges)
+        elseif #path > 0 then
+            misses = 0
+            followPath(path, badEdges)
+        end
+        releaseInput()
+        task.wait(misses > 0 and 0.25 or 0.12)
     end
-    Move.Homing = false
-    Move.HomingLive = nil
-    Move.HomingRoute = nil
+    Move.Homing, Move.HomingLive, Move.HomingRoute = false, nil, nil
     autoEnd()
     return ok
 end
@@ -6792,6 +6840,11 @@ Auto.dropTrip = dropTrip
 
 -- Auto Drop memilih item penuh dan menyimpan satu posisi berdiri di world ini.
 do
+    local function hasDropSpace(x, y, facing)
+        local frontX = x + facing
+        return frontX >= 0 and frontX < Refs.World.w and openAt(frontX, y)
+    end
+
     function AutoDrop.targetError()
         local w = Refs.World
         if not w or not Refs.Inv or not playerState() then return "Masuk world dan hubungkan referensi game dulu" end
@@ -6799,9 +6852,8 @@ do
         if Guard.worldName() ~= AutoDrop.World then return "Menunggu world " .. AutoDrop.World end
         if AutoDrop.X >= w.w or AutoDrop.Y >= w.h or not openAt(AutoDrop.X, AutoDrop.Y)
             or not realSupport(AutoDrop.X, AutoDrop.Y) then return "Tile drop harus bisa dipijak dengan aman" end
-        local frontX = AutoDrop.X + AutoDrop.Facing
-        if frontX < 0 or frontX >= w.w or not openAt(frontX, AutoDrop.Y) then
-            return "Tile di depan posisi drop terhalang"
+        if not hasDropSpace(AutoDrop.X, AutoDrop.Y, 1) and not hasDropSpace(AutoDrop.X, AutoDrop.Y, -1) then
+            return "Kedua sisi posisi drop terhalang"
         end
         if not OrigIsDown then return "Kontrol gerak game belum ketemu" end
         if not Refs.Hud or type(rawget(Refs.Hud, "onDrop")) ~= "function" then return "Fungsi drop game belum ketemu" end
@@ -6929,38 +6981,55 @@ do
         end
     end
 
-    local function protectDrop(id, x, y, world, grid, facing, before, amount)
+    local function protectDrop(id, x, y, world, grid, dropX, dropY, before, amount)
         for _, zone in ipairs(AutoDrop.Zones) do
             if zone.id == id and zone.world == world and zone.grid == grid and zone.x == x and zone.y == y then
-                zone.dropX, zone.dropY, zone.at = x + facing, y, os.clock()
+                zone.dropX, zone.dropY, zone.at = dropX, dropY, os.clock()
                 zone.before, zone.amount = before, amount
                 trackDrop(zone)
                 return zone
             end
         end
-        local zone = { id = id, x = x, y = y, world = world, grid = grid, dropX = x + facing, dropY = y,
+        local zone = { id = id, x = x, y = y, world = world, grid = grid, dropX = dropX, dropY = dropY,
             at = os.clock(), piles = {}, before = before, amount = amount }
         AutoDrop.Zones[#AutoDrop.Zones + 1] = zone
         trackDrop(zone)
         return zone
     end
 
+    local function pileKey(drop, zone, pending)
+        if type(drop) ~= "table" or drop.id ~= zone.id or (drop.n or 0) <= 0
+            or type(drop.x) ~= "number" or type(drop.y) ~= "number" then return nil end
+        local key = drop.uid or drop
+        if zone.piles[key] or (pending and pending[key]) then return key end
+        return nil
+    end
+
     -- Hindari koordinat item asli, dengan cadangan arah drop selama replikasi.
-    function AutoDrop.route()
-        local obstacles, current = {}, playerState()
+    function AutoDrop.route(predicted)
+        local obstacles, watch, current = {}, {}, playerState()
+        local watchUntil = 0
+        if predicted then obstacles[1] = predicted end
         for _, zone in ipairs(AutoDrop.Zones) do
             if zone.world == Guard.worldName() and Refs.World and zone.grid == Refs.World.fg then
                 local pending = zone.before and trackDrop(zone)
+                local expires = (zone.at or 0) + 3
+                local known = os.clock() < expires and {} or nil
+                if known then
+                    watch[zone] = known
+                    watchUntil = math.max(watchUntil, expires)
+                end
                 local found = false
                 for _, drop in pairs(Drops.list or {}) do
-                    if type(drop) == "table" and drop.id == zone.id and (drop.n or 0) > 0
-                        and type(drop.x) == "number" and type(drop.y) == "number"
-                        and (zone.piles[drop.uid or drop] or (pending and pending[drop.uid or drop])) then
-                        obstacles[#obstacles + 1] = { x = drop.x, y = drop.y }
+                    local key = pileKey(drop, zone, pending)
+                    if key then
+                        local point = { x = drop.x, y = drop.y }
+                        obstacles[#obstacles + 1] = point
+                        if known then known[key] = point end
                         found = true
                     end
                 end
-                if zone.before or (not found and os.clock() - (zone.at or 0) < 5) then
+                if not found and (zone.before or os.clock() - (zone.at or 0) < 5) then
                     obstacles[#obstacles + 1] = { x = zone.dropX or zone.x, y = zone.dropY or zone.y }
                 end
             end
@@ -6972,16 +7041,43 @@ do
             item.startDistance = current and abs(current.x - item.x) or 0
         end
         local route = {}
+        local startX, startY, startBodyX, startBodyY
+        if current then
+            startX, startY = startNode(current)
+            startBodyX, startBodyY = current.x, current.y - 0.475
+        end
+        if next(watch) then
+            local checkAt = os.clock() + 0.15
+            function route.needsRefresh()
+                local now = os.clock()
+                if now < checkAt or now >= watchUntil then return false end
+                checkAt = now + 0.15
+                for zone, known in pairs(watch) do
+                    local pending = zone.before and trackDrop(zone)
+                    for _, drop in pairs(Drops.list or {}) do
+                        local key = pileKey(drop, zone, pending)
+                        if key then
+                            local old = known[key]
+                            if not old or abs(old.x - drop.x) > 0.12 or abs(old.y - drop.y) > 0.12 then
+                                return true
+                            end
+                        end
+                    end
+                end
+                return false
+            end
+        end
         function route.point(x, y)
             for _, item in ipairs(obstacles) do if inside(x + 0.5, y + 0.5, item) then return false end end
             return true
         end
         function route.edge(fx, fy, tx, ty, kind)
             local x0, y0, x1, y1 = fx + 0.5, fy + 0.5, tx + 0.5, ty + 0.5
+            if fx == startX and fy == startY then x0, y0 = startBodyX, startBodyY end
             for _, item in ipairs(obstacles) do
                 if inside(x0, y0, item) then
                     -- Keluar dari radius drop hanya dengan berjalan menjauh.
-                    if kind ~= "walk" or fy ~= ty or (x0 - item.x) * (x1 - item.x) <= 0
+                    if kind ~= "walk" or fy ~= ty or (x0 - item.x) * (x1 - item.x) < 0
                         or abs(x1 - item.x) <= abs(x0 - item.x) then return false end
                 else
                     local top = math.min(y0, y1)
@@ -6992,31 +7088,16 @@ do
             end
             return true
         end
-        function route.safe(s)
+        function route.safe(s, arriving)
             if not s then return false end
             for _, item in ipairs(obstacles) do
                 if inside(s.x, s.y - 0.475, item) then
-                    if not item.escaping or abs(s.x - item.x) < item.startDistance - 0.02 then return false end
+                    if arriving or not item.escaping or abs(s.x - item.x) < item.startDistance - 0.02 then return false end
                 else item.escaping = false end
             end
             return true
         end
         return route
-    end
-
-    local function retreat(facing, live)
-        local s = playerState()
-        if not s then return false end
-        local x, y = startNode(s)
-        local route = AutoDrop.route()
-        for distance = 1, 2 do
-            local target = x - facing * distance
-            if target >= 0 and target < Refs.World.w and openAt(target, y) and realSupport(target, y)
-                and route.point(target, y) and route.edge(x, y, target, y, "walk") then
-                return walkTo(target, y, 6, live, route)
-            end
-        end
-        return route.point(x, y)
     end
 
     local function atPoint(x, y, facing)
@@ -7026,6 +7107,16 @@ do
     end
 
     function AutoDrop.trip(items)
+        local state = playerState()
+        if not state or state.dead or not state.grounded or AutoInput.collectOwner then
+            AutoDrop.Status = "Menunggu karakter kembali ke pijakan farm"
+            return
+        end
+        local hx, hy = startNode(state)
+        if not openAt(hx, hy) or not realSupport(hx, hy) then
+            AutoDrop.Status = "Menunggu karakter kembali ke pijakan farm"
+            return
+        end
         local world, fg = Refs.World, Refs.World.fg
         for index = #AutoDrop.Zones, 1, -1 do
             local zone = AutoDrop.Zones[index]
@@ -7033,7 +7124,6 @@ do
         end
         local token = Guard.Token
         local x, y, facing = AutoDrop.X, AutoDrop.Y, AutoDrop.Facing
-        local hx, hy = startNode(playerState())
         local saved = Guard.snapshot()
         AutoDrop.Busy, AutoDrop.Cancelled, AutoDrop.Saved = true, false, saved
         local function sameWorld()
@@ -7041,40 +7131,65 @@ do
                 and Refs.World == world and world.fg == fg and Guard.worldName() == saved.world
         end
         local function live() return sameWorld() and AutoDrop.On end
-        local returned, failure, didDrop = false, nil, false
+        local returned, failure, departed = false, nil, false
         local droppedZones, freedItems = {}, {}
         local ok, err = pcall(function()
             Guard.stopAll(true)
             AutoDrop.Status = "Menjeda farming untuk drop"
             task.wait(1.2)
             if not live() then return end
-            if not walkTo(x, y, 45, live, AutoDrop.route()) or not live() then
-                failure = "Posisi drop tidak terjangkau"
+            AutoDrop.Status = "Jalan ke titik drop"
+            departed = true
+            if not walkTo(x, y, 60, live, AutoDrop.route) or not live() then
+                if live() then failure = "Posisi drop tidak terjangkau" end
                 return
             end
-            -- Hadapkan karakter sebelum drop. Lokasi dan arah diperiksa lagi tepat sebelum kirim.
+            local function returnPath(direction)
+                local s = playerState()
+                if not live() or not s or not atPoint(x, y) or not hasDropSpace(x, y, direction) then return false end
+                local route = AutoDrop.route({ x = s.x + direction, y = s.y - 0.475 })
+                if hx == x and hy == y then return route.safe(s, true) end
+                route.badEdges, route.live = {}, live
+                local goal = { [hy * world.w + hx] = true }
+                return route.point(hx, hy) and astar(x, y, goal, hx, hy, 0.5, false, route) ~= nil
+            end
+            if not returnPath(facing) then
+                if not returnPath(-facing) then
+                    failure = "Drop ditunda karena item akan menutup jalur pulang"
+                    return
+                end
+                facing = -facing
+            end
+            -- Putar badan di tile tujuan, lalu periksa ulang posisi dan jalur.
             AutoInput.active = true
-            local s = playerState()
-            if s and ((s.facing or 1) < 0 and -1 or 1) ~= facing then
+            for _ = 1, 3 do
+                if not live() or not atPoint(x, y) or atPoint(x, y, facing) then break end
                 AutoInput.left, AutoInput.right = facing < 0, facing > 0
-                task.wait(0.04)
+                task.wait(0.045)
                 releaseInput()
-                task.wait(0.15)
+                task.wait(0.12)
             end
             local function canDrop() return live() and atPoint(x, y, facing) end
             if not canDrop() then failure = "Karakter belum berada di tile atau arah drop" return end
+            if not returnPath(facing) then failure = "Drop ditunda karena item akan menutup jalur pulang" return end
             for _, id in ipairs(items) do
                 if not canDrop() then break end
                 if table.find(AutoDrop.Items, id) and invCount(id) >= 200 then
                     AutoDrop.Status = "Drop " .. itemName(id) .. " x200"
                     pcall(findDropRefs)
+                    if #droppedZones > 0 and not returnPath(facing) then
+                        failure = "Drop ditunda karena item akan menutup jalur pulang"
+                        break
+                    end
                     local before = dropAmounts(id)
+                    local origin = playerState()
+                    if not origin or not canDrop() then break end
+                    local dropX, dropY = origin.x + facing, origin.y - 0.475
                     local got, reason = dropItems(id, 200, canDrop, false)
                     AutoDrop.Dropped += got
                     if got > 0 then
-                        didDrop = true
                         pcall(findDropRefs)
-                        local zone = protectDrop(id, x + 0.5, y + 0.5, saved.world, fg, facing, before, got)
+                        local zone = protectDrop(id, x + 0.5, y + 0.5, saved.world, fg, dropX, dropY, before, got)
                         droppedZones[#droppedZones + 1] = zone
                         freedItems[id] = true
                     end
@@ -7085,10 +7200,10 @@ do
         if not ok then failure = tostring(err) end
         -- Pulang tetap dilakukan ketika toggle dimatikan di tengah perjalanan.
         if sameWorld() then
-            AutoDrop.Status = "Menjauh dari item dan mencari jalur pulang"
+            AutoDrop.Status = "Mencari jalur pulang yang aman"
             local backOk, result = pcall(function()
-                if didDrop and not retreat(facing, sameWorld) then return false end
-                return walkTo(hx, hy, 45, sameWorld, AutoDrop.route())
+                if not departed and atPoint(hx, hy) then return true end
+                return walkTo(hx, hy, 60, sameWorld, AutoDrop.route)
             end)
             returned = backOk and result == true
             if not backOk then failure = tostring(result) end
@@ -10418,7 +10533,7 @@ do (function()
     safe(function()
         UI.AutoDropFacing = pointBox:Dropdown({
             Title = "Arah drop",
-            Desc = "Item jatuh di depan karakter sesuai arah drop.",
+            Desc = "Arah pilihan dipakai selama jalur pulang aman. Arah bisa dibalik otomatis.",
             Values = { "Kanan", "Kiri" },
             Value = AutoDrop.Facing < 0 and "Kiri" or "Kanan",
             Callback = function(option)
