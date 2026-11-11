@@ -5,7 +5,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = nama versi l
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-11-auto-drop-routing-1"
+Session.Build = "2026-11-11-dirt-farm-background-1"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -987,7 +987,8 @@ I18N.EN = {
         "No safe way back. Auto Drop stopped. Change the drop tile or direction.",
     ["Arah pilihan dipakai selama jalur pulang aman. Arah bisa dibalik otomatis."] = "The preferred direction is used when the way back is safe. The direction can reverse automatically.",
     ["Jalankan Auto Dirt Farm"] = "Run Auto Dirt Farm",
-    ["Buka celah 1 tile, buat tangga di ujung, lalu isi lantai dengan Dirt."] = "Clear a one-tile gap, make stairs at the ends, then fill the floors with Dirt.",
+    ["Bersihkan block dan background di celah serta tangga, lalu isi lantai dengan Dirt."] =
+        "Clear blocks and backgrounds from the gaps and stairs, then fill the floors with Dirt.",
     ["Batas area"] = "Area bounds",
     ["Y baris bawah"] = "Bottom row Y",
     ["Kosong atau -1 = sampai bedrock"] = "Blank or -1 means down to bedrock",
@@ -2695,7 +2696,7 @@ local function tryBreak(x, y, includeBg, onlyId, allowHit)
         PlacedAt[key] = nil
     end
 
-    if allowHit and not allowHit(x, y, id) then return nil end
+    if allowHit and not allowHit(x, y, id, layer) then return nil end
     if onlyId and (not Clear.Running or Clear.TargetId ~= onlyId or not Refs.Punch
         or not Refs.World or Refs.World.fg ~= Clear.TargetGrid or Refs.World.name ~= Clear.TargetWorld
         or tileAt("fg", x, y) ~= onlyId) then return nil end
@@ -8269,10 +8270,12 @@ function Build.dirtWorldMatches(run)
     return w == run.world and w.fg == run.grid and w.name == run.worldName
 end
 
-function Build.allowDirtHit(x, y, id)
+function Build.allowDirtHit(x, y, id, layer)
     local run = Build.DirtRun
-    return Build.Running and run and Build.dirtWorldMatches(run) and not raymanOn()
-        and fgIdAt(x, y) == id and Build.canDigTerrain(id) and canWorkAt(x, y)
+    if not Build.Running or not run or not Build.dirtWorldMatches(run) or raymanOn()
+        or tileAt(layer, x, y) ~= id or not canWorkAt(x, y) then return false end
+    if layer == "bg" then return fgIdAt(x, y) == 0 and clearCanBreak(id) end
+    return Build.canDigTerrain(id)
 end
 
 function Build.activeBlock()
@@ -8343,12 +8346,14 @@ end
 -- Pohon & benda tidak padat dibiarkan.
 function Build.carveLayer(x, y, W, dirt)
     local fg = fgIdAt(x, y)
-    if dirt then return Build.canDigTerrain(fg) and "fg" or nil end
     if fg ~= 0 then
+        if dirt then return Build.canDigTerrain(fg) and "fg" or nil end
         local it = ItemDB[fg]
         if it and it.kind ~= "seed" and (it.solid or it.deadly or it.hurts) and canBreak(fg) then return "fg" end
         return nil
     end
+    -- Celah yang sudah digali sebelum execute ulang tetap punya background.
+    if dirt then return clearCanBreak(tileAt("bg", x, y)) and "bg" or nil end
     if y >= (Build.Surface or math.huge) or Build.Carved[y * W + x] then
         local bg = tileAt("bg", x, y)
         if bg and bg ~= 0 and canBreak(bg) then return "bg" end
@@ -8368,9 +8373,14 @@ function Build.carveList(P, live)
         if y < 0 then return end
         if Build.carveLayer(x, y, W, P.dirt) then
             list[#list + 1] = { x = x, y = y, idx = y * W + x, kind = kind }
-        elseif P.dirt and fgIdAt(x, y) ~= 0 then
-            local item = ItemDB[fgIdAt(x, y)]
-            if not item or item.kind ~= "seed" then kept += 1 end
+        elseif P.dirt then
+            local fg = fgIdAt(x, y)
+            if fg ~= 0 then
+                local item = ItemDB[fg]
+                if not item or item.kind ~= "seed" then kept += 1 end
+            elseif (tileAt("bg", x, y) or 0) ~= 0 then
+                kept += 1
+            end
         end
     end
     local surf = Build.Surface or math.huge
@@ -12553,7 +12563,7 @@ do
     safe(function()
         UI.DirtToggle = tab:Toggle({
             Title = "Jalankan Auto Dirt Farm",
-            Desc = "Buka celah 1 tile, buat tangga di ujung, lalu isi lantai dengan Dirt.",
+            Desc = "Bersihkan block dan background di celah serta tangga, lalu isi lantai dengan Dirt.",
             Value = false,
             Callback = function(on)
                 if on then Build.start(true) elseif Build.DirtRun then Build.stop() end
