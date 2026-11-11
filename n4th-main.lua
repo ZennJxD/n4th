@@ -5,7 +5,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = nama versi l
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-11-dirt-farm-background-1"
+Session.Build = "2026-11-11-dirt-farm-place-range-1"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -3962,6 +3962,7 @@ local function astar(sx, sy, goals, gx, gy, R, useBlock, route)
                     -- jangan berdiri tepat di atas target (noSelf: juga jangan di dalam tile target)
                     if tx >= 0 and tx < W and goals[base + tx] and not (tx == nx and ty == ny + 1)
                         and not (goals.noSelf and tx == nx and ty == ny)
+                        and not (goals.startState and nx == sx and ny == sy and not stateReaches(goals.startState, tx, ty, R))
                         and not (goals.los and ty - ny >= 2 and not open(tx, ny + 1))
                         and not (goals.los and ny - ty >= 2 and not open(tx, ny - 1)) then
                         if not goals.preferBatch then return 1 end
@@ -8274,8 +8275,16 @@ function Build.allowDirtHit(x, y, id, layer)
     local run = Build.DirtRun
     if not Build.Running or not run or not Build.dirtWorldMatches(run) or raymanOn()
         or tileAt(layer, x, y) ~= id or not canWorkAt(x, y) then return false end
+    local s = playerState()
+    if not s or not s.grounded or not stateReaches(s, x, y, punchReach() - 0.08) then return false end
     if layer == "bg" then return fgIdAt(x, y) == 0 and clearCanBreak(id) end
     return Build.canDigTerrain(id)
+end
+
+function Build.placeReach()
+    local range = buildReach()
+    if Build.DirtRun then return math.min(2, range) end
+    return range - 0.08
 end
 
 function Build.activeBlock()
@@ -8285,7 +8294,8 @@ end
 local function placeBuild(t, s)
     local id = Build.activeBlock()
     if Build.DirtRun and not Build.dirtWorldMatches(Build.DirtRun) then return false end
-    if invCount(id) <= (Build.Reserve or 0) or overlapsPlayer(t.x, t.y, s) then return false end
+    if invCount(id) <= (Build.Reserve or 0) or overlapsPlayer(t.x, t.y, s)
+        or not stateReaches(s, t.x, t.y, Build.placeReach()) then return false end
     if not placeOk(t.x, t.y) then
         skipTile(Build.Skip, t.idx, 120)
         return false
@@ -8437,6 +8447,7 @@ function Build.goNear(targets, R, maxY, noSelf, live)
     if not w or not s then return "wait" end
     local sx, sy = startNode(s)
     local goals = { maxY = maxY, noSelf = noSelf }
+    if Build.DirtRun then goals.startState = s end
     for _, t in ipairs(targets) do goals[t.idx] = true end
     local f = targets[1]
     setMoveStatus(("Cari jalan A* ke (%d,%d)"):format(f.x, f.y))
@@ -8531,7 +8542,11 @@ function Build.fillTile(t, live, dirt)
     if not live() then return "stop" end
     if fgIdAt(t.x, t.y) == 0 then
         local cur = playerState()
-        if not cur or invCount(Build.activeBlock()) <= 0 or not placeBuild(t, cur) then
+        if not cur or not cur.grounded then return "fall" end
+        if not stateReaches(cur, t.x, t.y, Build.placeReach()) or overlapsPlayer(t.x, t.y, cur) then
+            return "move"
+        end
+        if invCount(Build.activeBlock()) <= 0 or not placeBuild(t, cur) then
             skipTile(Build.Skip, t.idx, 30)
             return "skip"
         end
@@ -8558,7 +8573,7 @@ function Build.carveStep(P, list, live)
     end
     Move.AirAt = nil
     releaseInput()
-    local R = punchReach() - 0.08
+    local hitR, placeR = punchReach() - 0.08, Build.placeReach()
     local now = os.clock()
     local fi = nil
     for i, t in ipairs(list) do
@@ -8574,6 +8589,7 @@ function Build.carveStep(P, list, live)
         local t = list[j]
         if not skipped(Build.Skip, t.idx, now) then
             local cur = playerState()
+            local R = (t.kind == "fill" and fgIdAt(t.x, t.y) == 0) and placeR or hitR
             if not cur or cur.dead or not cur.grounded or not stateReaches(cur, t.x, t.y, R) then break end
             if t.kind == "fill" and overlapsPlayer(t.x, t.y, cur) then break end -- berdiri di lubangnya: pindah dulu
             if not canWorkAt(t.x, t.y) then
@@ -8598,11 +8614,17 @@ function Build.carveStep(P, list, live)
     end
     if did > 0 then return "work" end
     local F = list[fi]
-    local r = Build.goNear({ F }, math.min(punchReach(), buildReach()) - 0.35, nil, F.kind == "fill", live)
+    local filling = F.kind == "fill"
+    local R = (filling and fgIdAt(F.x, F.y) == 0) and placeR or hitR
+    local r = Build.goNear({ F }, R, nil, filling, live)
     if r == "nopath" then
         -- belum ada jalan ke sini: lewati sebaris dulu (tidak cari jalan berulang per tile)
-        for _, t in ipairs(list) do
-            if t.y == F.y then skipTile(Build.Skip, t.idx, 30) end
+        if filling then
+            skipTile(Build.Skip, F.idx, 5)
+        else
+            for _, t in ipairs(list) do
+                if t.y == F.y then skipTile(Build.Skip, t.idx, 30) end
+            end
         end
         return "move"
     end
@@ -8645,7 +8667,7 @@ function Build.placeStep(P, live)
     releaseInput()
     local W = P.W
     local id = Build.activeBlock()
-    local R = buildReach() - 0.08
+    local placeR, hitR = Build.placeReach(), punchReach() - 0.08
     local now = os.clock()
     local k, T = nil, nil
     for kk = P.K, 1, -1 do
@@ -8685,8 +8707,10 @@ function Build.placeStep(P, live)
         if not live() then return "wait" end
         local cur = playerState()
         if not cur or not cur.grounded then break end
+        local occupied = fgIdAt(t.x, t.y) ~= 0
+        local R = occupied and hitR or placeR
         if stateReaches(cur, t.x, t.y, R) and (onRow or under or entry[t.x]) then
-            if fgIdAt(t.x, t.y) ~= 0 then
+            if occupied then
                 -- tile lahan berisi pohon / lava / hiasan: pecah dulu
                 if not canWorkAt(t.x, t.y) or (P.dirt and not Build.canDigTerrain(fgIdAt(t.x, t.y))) then
                     skipTile(Build.Skip, t.idx, 300)
@@ -8721,7 +8745,7 @@ function Build.placeStep(P, live)
     if done > 0 then return "work" end
     if invCount(id) <= (Build.Reserve or 0) then return "none" end
 
-    local RR = buildReach() - 0.35
+    local RR = P.dirt and placeR or placeR - 0.27
     -- naik ke baris ini lalu pasang ke depan (baris jadi jembatan)
     if hasAny and not under then
         local r = Build.goNear(T, RR, y - 1, true, live)
@@ -8917,7 +8941,7 @@ function Build.bootstrap(o)
     local s = playerState()
     if not s or not s.grounded then return false end
     if not spot then
-        local R = farmReach() - 0.08
+        local R = o.plan and math.min(punchReach() - 0.08, Build.placeReach()) or farmReach() - 0.08
         local ty = floor(s.y - 0.475)
         for _, dx in ipairs({ 1, 2, -1, -2 }) do -- kanan dulu
             local tx = floor(s.x) + dx
@@ -8942,7 +8966,11 @@ function Build.bootstrap(o)
         local id = fgIdAt(spot.x, spot.y)
         if o.plan and id ~= 0 and id ~= o.block then break end
         if id == 0 then
-            if o.plan and not placeOk(spot.x, spot.y) then break end
+            if o.plan then
+                local cur = playerState()
+                if not cur or not cur.grounded or not stateReaches(cur, spot.x, spot.y, Build.placeReach())
+                    or overlapsPlayer(spot.x, spot.y, cur) or not placeOk(spot.x, spot.y) then break end
+            end
             if not sendSetTile("fg", spot.x, spot.y, o.block) then break end
             pcall(function() Refs.Inv:remove(o.block, 1) end)
             PlacedAt[spot.x .. "," .. spot.y] = os.clock()
