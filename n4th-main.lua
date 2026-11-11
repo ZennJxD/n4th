@@ -5,7 +5,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = nama versi l
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-10-name-and-farm-routing-1"
+Session.Build = "2026-11-11-auto-drop-collect-1"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -2874,7 +2874,20 @@ function Drops.applyTaken(d, left)
     end
 end
 
+function AutoDrop.isProtected(d)
+    local world = Refs.World
+    if not world then return false end
+    local key = d.uid or d
+    for _, zone in ipairs(AutoDrop.Zones) do
+        if zone.world == world.name and zone.grid == world.fg and zone.id == d.id and zone.piles[key] then
+            return true
+        end
+    end
+    return false
+end
+
 local function takeDrop(d)
+    if AutoDrop.Busy or AutoDrop.isProtected(d) then return false end
     local worldTake = Refs.World and rawget(Refs.World, "takeDrop")
     if type(worldTake) ~= "function" and not TakeDropRemote then return false end
     if d.taking or d.pending or d.display or (d.n or 0) <= 0 then return false end
@@ -2949,10 +2962,7 @@ local nextDropScan = 0
 local function canTry(d, now)
     if type(d) ~= "table" or d.taking or (d.n or 0) <= 0 or type(d.x) ~= "number" then return false end
     if d.armed == false and d.id ~= 112 then return false end
-    for _, zone in ipairs(AutoDrop.Zones) do
-        if zone.world == (Refs.World and rawget(Refs.World, "name")) and zone.id == d.id
-            and math.abs(d.x - zone.x) <= 2.5 and math.abs(d.y - zone.y) <= 2.5 then return false end
-    end
+    if AutoDrop.isProtected(d) then return false end
     local fail = DropFailUntil[d.uid]
     return not (fail and now < fail)
 end
@@ -3336,7 +3346,10 @@ end
 
 local function farmLoop(runId)
     local lastStatus = 0
-    while State.Running and alive() and State.RunId == runId do
+    local function currentRun()
+        return State.Running and alive() and State.RunId == runId
+    end
+    while currentRun() do
         if State.DropPause then -- sedang pergi drop seed
             task.wait(0.2)
             continue
@@ -3360,17 +3373,22 @@ local function farmLoop(runId)
         -- 0) Ambil drop di semua tile grid dengan sentuhan badan (sekali sapu), lalu balik ke posisi
         if (State.AutoCollect or State.Override) and not State.DropPause then
             Drops.waitSpawn(tiles) -- drop pecahan barusan datang dari server: tunggu muncul dulu
+            if not currentRun() then break end
             if State.CollectMode == "Remote" then
-                for _, t in ipairs(tiles) do waitTileDrops(t, 0.4) end -- diambil lewat remote (collectTick)
+                for _, t in ipairs(tiles) do
+                    if not currentRun() then break end
+                    waitTileDrops(t, 0.4)
+                end
             elseif Drops.touchAll then
-                Drops.touchAll(tiles, px, py)
+                Drops.touchAll(tiles, px, py, currentRun)
             end
         end
+        if not currentRun() then break end
 
         -- 1) Place semua tile kosong
         if doPlace then
             for _, t in ipairs(tiles) do
-                if not State.Running or State.DropPause then break end
+                if not currentRun() or State.DropPause then break end
                 local r = tryPlace(t.x, t.y)
                 if r == "habis" then
                     outOfBlock = true
@@ -3389,7 +3407,7 @@ local function farmLoop(runId)
         if doBreak then
             local K = math.clamp(math.floor(State.MultiTarget or 1), 1, 5)
             local nextI, active = 1, {}
-            while State.Running and alive() and not State.DropPause do
+            while currentRun() and not State.DropPause do
                 while #active < K and nextI <= #tiles do
                     local t = tiles[nextI]
                     nextI += 1
@@ -3408,8 +3426,8 @@ local function farmLoop(runId)
                 if rayDir then raymanAct(rayDir) end
                 local hit, broke = false, false
                 for i, a in ipairs(hits) do
-                    if not State.Running then break end
                     if i > 1 then task.wait(0.05) end -- jarak antar tile seperti animasi Rayman
+                    if not currentRun() or State.DropPause then break end
                     local r = tryBreak(a.x, a.y)
                     a.n += 1
                     if r then hit, acted = true, true end
@@ -3437,14 +3455,14 @@ local function farmLoop(runId)
                     if rayDir then gap = math.max(gap, 0.35) end -- jeda Rayman asli
                     local rest = gap - (os.clock() - t0)
                     if rest > 0.005 then task.wait(rest) end
-                    if not (State.Running and alive()) then break end
+                    if not currentRun() then break end
                 end
                 -- drop diambil otomatis oleh collector cepat
                 if broke and State.AfterBreakMs > 0 then task.wait(State.AfterBreakMs / 1000) end
             end
         end
 
-        if not State.Running or not alive() then break end
+        if not currentRun() then break end
         if State.DropPause then continue end
 
         if not acted then
@@ -4067,6 +4085,7 @@ end
 -- ---------- Gerakkan karakter ----------
 local function releaseInput()
     AutoInput.left, AutoInput.right, AutoInput.jump, AutoInput.down = false, false, false, false
+    AutoInput.collectOwner = nil
 end
 
 local function frame()
@@ -4471,9 +4490,9 @@ end
 --   - tile baris atas (kiri, tengah, kanan): berdiri di bawahnya lalu lompat kecil (tap); selama di udara
 --     geser ke tile atas berikutnya yang masih ada drop-nya (bisa kena 2 sekaligus)
 -- lalu balik lagi ke posisi kerja (hx, hy). Hasil: true = sudah balik ke posisi kerja.
-function Drops.touchAll(tiles, hx, hy)
+function Drops.touchAll(tiles, hx, hy, live)
     local list = Drops.list
-    if not list or not OrigIsDown then return false end
+    if not list or not OrigIsDown or AutoDrop.Busy then return false end
     local function dropsAt(t)
         for _, d in ipairs(list) do
             if type(d) == "table" and type(d.x) == "number" and (d.n or 0) > 0 and d.armed ~= false
@@ -4490,6 +4509,7 @@ function Drops.touchAll(tiles, hx, hy)
     if #has == 0 then return false end
     local s0 = playerState()
     if not s0 or s0.dead or not s0.grounded then return false end
+    local route = #AutoDrop.Zones > 0 and AutoDrop.route and AutoDrop.route()
     local function ground(c) return openAt(c, hy) and realSupport(c, hy) end
     local function walkable(a, b)
         local st = (b >= a) and 1 or -1
@@ -4499,11 +4519,22 @@ function Drops.touchAll(tiles, hx, hy)
         return true
     end
     local was = AutoInput.active
+    local owner = {}
+    AutoInput.collectOwner = owner
     AutoInput.active = true
+    local function canMove()
+        return AutoInput.collectOwner == owner and alive() and not AutoDrop.Busy and (not live or live())
+    end
     local function moveTo(cx, maxT)
+        if not canMove() then return false end
+        if route then
+            local state = playerState()
+            if not state or not route.edge(floor(state.x), floor(state.y - 0.475), floor(cx), hy, "walk") then return false end
+        end
         local t0 = os.clock()
-        while alive() and os.clock() - t0 < (maxT or 1.2) do
+        while os.clock() - t0 < (maxT or 1.2) do
             task.wait()
+            if not canMove() then return false end
             local c = playerState()
             if not c or c.dead then break end
             steerX(c, cx, 0.1)
@@ -4517,14 +4548,20 @@ function Drops.touchAll(tiles, hx, hy)
     end
     -- lompat kecil (tap = naik +-1.4 tile, tidak sampai naik ke atas baris block), di udara geser ke toX
     local function hop(toX)
+        if not canMove() then return end
         AutoInput.left, AutoInput.right = false, false
         local c0 = playerState()
         if not c0 then return end
+        if route then
+            local x, y = floor(c0.x), floor(c0.y - 0.475)
+            if not route.edge(x, y, floor(toX or c0.x), y, "jump") then return end
+        end
         local y0 = c0.y
         AutoInput.jump = true
         local t0, air = os.clock(), false
-        while alive() and os.clock() - t0 < 1.4 do
+        while os.clock() - t0 < 1.4 do
             task.wait()
+            if not canMove() then return end
             local c = playerState()
             if not c or c.dead then break end
             if not c.grounded then
@@ -4550,7 +4587,7 @@ function Drops.touchAll(tiles, hx, hy)
     -- baris atas: lompat di bawah tile yang masih ada drop-nya (maks 4 lompatan)
     for _ = 1, 4 do
         local cs = playerState()
-        if not cs or not alive() then break end
+        if not cs or not canMove() then break end
         local cur = floor(cs.x)
         local cols = {}
         for _, t in ipairs(has) do
@@ -4567,9 +4604,11 @@ function Drops.touchAll(tiles, hx, hy)
     end
     -- balik ke posisi kerja
     local ok = moveTo(hx + 0.5, 2)
-    AutoInput.left, AutoInput.right, AutoInput.jump = false, false, false
-    AutoInput.active = was
-    waitNearDrops(0.2)
+    if AutoInput.collectOwner == owner then
+        releaseInput()
+        AutoInput.active = was
+        if ok then waitNearDrops(0.2) end
+    end
     return ok
 end
 
@@ -6773,33 +6812,85 @@ do
         return labels, picked
     end
 
-    local function protectDrop(id, x, y, world, facing)
-        for _, zone in ipairs(AutoDrop.Zones) do
-            if zone.id == id and zone.world == world and zone.x == x and zone.y == y then
-                zone.dropX, zone.dropY, zone.at = x + facing, y, os.clock()
-                return
+    local function dropAmounts(id)
+        local amounts = {}
+        for _, drop in pairs(Drops.list or {}) do
+            if type(drop) == "table" and drop.id == id and type(drop.n) == "number" then
+                amounts[drop.uid or drop] = drop.n
             end
         end
-        AutoDrop.Zones[#AutoDrop.Zones + 1] = {
-            id = id, x = x, y = y, world = world, dropX = x + facing, dropY = y, at = os.clock(),
-        }
+        return amounts
+    end
+
+    -- Catat ID tumpukan baru atau tumpukan yang bertambah saat drop berlangsung.
+    -- Farm masih dijeda sampai pencatatan ini selesai.
+    local function trackDrop(zone, final)
+        local changes, observed = {}, 0
+        for _, drop in pairs(Drops.list or {}) do
+            if type(drop) == "table" and drop.id == zone.id and type(drop.n) == "number"
+                and type(drop.x) == "number" and type(drop.y) == "number"
+                and abs(drop.x - zone.x) <= 2.5 and abs(drop.y - zone.y) <= 2.5 then
+                local key = drop.uid or drop
+                local added = drop.n - (zone.before[key] or 0)
+                if added > 0 then
+                    if added >= zone.amount then
+                        zone.piles[key] = true
+                        zone.before = nil
+                        return
+                    end
+                    changes[#changes + 1] = { key = key, amount = added }
+                    observed += added
+                end
+            end
+        end
+        if observed >= zone.amount or final then
+            table.sort(changes, function(a, b) return a.amount > b.amount end)
+            local remaining = zone.amount
+            for _, change in ipairs(changes) do
+                zone.piles[change.key] = true
+                remaining -= change.amount
+                if remaining <= 0 then break end
+            end
+            zone.before = nil
+        else
+            local pending = {}
+            for _, change in ipairs(changes) do pending[change.key] = true end
+            return pending
+        end
+    end
+
+    local function protectDrop(id, x, y, world, grid, facing, before, amount)
+        for _, zone in ipairs(AutoDrop.Zones) do
+            if zone.id == id and zone.world == world and zone.grid == grid and zone.x == x and zone.y == y then
+                zone.dropX, zone.dropY, zone.at = x + facing, y, os.clock()
+                zone.before, zone.amount = before, amount
+                trackDrop(zone)
+                return zone
+            end
+        end
+        local zone = { id = id, x = x, y = y, world = world, grid = grid, dropX = x + facing, dropY = y,
+            at = os.clock(), piles = {}, before = before, amount = amount }
+        AutoDrop.Zones[#AutoDrop.Zones + 1] = zone
+        trackDrop(zone)
+        return zone
     end
 
     -- Hindari koordinat item asli, dengan cadangan arah drop selama replikasi.
     function AutoDrop.route()
         local obstacles, current = {}, playerState()
         for _, zone in ipairs(AutoDrop.Zones) do
-            if zone.world == Guard.worldName() then
+            if zone.world == Guard.worldName() and Refs.World and zone.grid == Refs.World.fg then
+                local pending = zone.before and trackDrop(zone)
                 local found = false
                 for _, drop in pairs(Drops.list or {}) do
                     if type(drop) == "table" and drop.id == zone.id and (drop.n or 0) > 0
                         and type(drop.x) == "number" and type(drop.y) == "number"
-                        and abs(drop.x - zone.x) <= 2.5 and abs(drop.y - zone.y) <= 2.5 then
+                        and (zone.piles[drop.uid or drop] or (pending and pending[drop.uid or drop])) then
                         obstacles[#obstacles + 1] = { x = drop.x, y = drop.y }
                         found = true
                     end
                 end
-                if os.clock() - (zone.at or 0) < 5 or (not found and not Drops.list) then
+                if zone.before or (not found and os.clock() - (zone.at or 0) < 5) then
                     obstacles[#obstacles + 1] = { x = zone.dropX or zone.x, y = zone.dropY or zone.y }
                 end
             end
@@ -6866,6 +6957,10 @@ do
 
     function AutoDrop.trip(items)
         local world, fg = Refs.World, Refs.World.fg
+        for index = #AutoDrop.Zones, 1, -1 do
+            local zone = AutoDrop.Zones[index]
+            if zone.grid ~= fg or zone.world ~= world.name then table.remove(AutoDrop.Zones, index) end
+        end
         local token = Guard.Token
         local x, y, facing = AutoDrop.X, AutoDrop.Y, AutoDrop.Facing
         local hx, hy = startNode(playerState())
@@ -6877,6 +6972,7 @@ do
         end
         local function live() return sameWorld() and AutoDrop.On end
         local returned, failure, didDrop = false, nil, false
+        local droppedZones, freedItems = {}, {}
         local ok, err = pcall(function()
             Guard.stopAll(true)
             AutoDrop.Status = "Menjeda farming untuk drop"
@@ -6901,11 +6997,16 @@ do
                 if not canDrop() then break end
                 if table.find(AutoDrop.Items, id) and invCount(id) >= 200 then
                     AutoDrop.Status = "Drop " .. itemName(id) .. " x200"
+                    pcall(findDropRefs)
+                    local before = dropAmounts(id)
                     local got, reason = dropItems(id, 200, canDrop, false)
                     AutoDrop.Dropped += got
                     if got > 0 then
                         didDrop = true
-                        protectDrop(id, x + 0.5, y + 0.5, saved.world, facing)
+                        pcall(findDropRefs)
+                        local zone = protectDrop(id, x + 0.5, y + 0.5, saved.world, fg, facing, before, got)
+                        droppedZones[#droppedZones + 1] = zone
+                        freedItems[id] = true
                     end
                     if reason then failure = reason break end
                 end
@@ -6925,6 +7026,19 @@ do
         Move.Homing, Move.HomingLive, Move.HomingRoute = false, nil, nil
         releaseInput()
         autoEnd()
+        if sameWorld() then
+            pcall(function()
+                findDropRefs()
+                for _, zone in ipairs(droppedZones) do if zone.before then trackDrop(zone, true) end end
+                for _, drop in pairs(Drops.list or {}) do
+                    if type(drop) == "table" and drop.uid and freedItems[drop.id] and not AutoDrop.isProtected(drop) then
+                        DropFailUntil[drop.uid] = nil
+                    end
+                end
+            end)
+            Drops.seen, Drops.nextTick = nil, 0
+        end
+        for _, zone in ipairs(droppedZones) do zone.before = nil end
         AutoDrop.Busy, AutoDrop.Saved = false, nil
         if returned and sameWorld() then
             local resumed, resumeError = pcall(Guard.resumeActivities, saved, sameWorld)
