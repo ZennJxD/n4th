@@ -5,7 +5,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = nama versi l
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-11-dirt-farm-place-range-1"
+Session.Build = "2026-11-12-dirt-farm-build-up-1"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -1419,6 +1419,7 @@ I18N.EN = {
 
 -- Frasa untuk teks yang berubah-ubah (status, notifikasi, pesan Discord)
 I18N.PH = {
+    { "Pasang Dirt dari bawah", "Placing Dirt from the bottom" },
     { "Dirt Farm selesai", "Dirt Farm complete" },
     { "lantai siap", "floors ready" },
     { "tile belum terbuka", "tiles still blocked" },
@@ -2590,7 +2591,7 @@ end
 ---------------------------------------------------------------------
 -- AKSI DASAR: place & pukul
 ---------------------------------------------------------------------
-local function sendSetTile(layer, x, y, id)
+local function sendSetTile(layer, x, y, id, skipLocalPrediction)
     if id ~= 0 and State.Visual and Anim.place then Anim.place(x, y, id) end
     if Refs.SetTile then
         local ok, err = pcall(Refs.SetTile, layer, x, y, id, false, false)
@@ -2609,7 +2610,7 @@ local function sendSetTile(layer, x, y, id)
         return false
     end
     local grid = Refs.World and Refs.World[layer]
-    if grid and grid[y] then grid[y][x] = id end
+    if not skipLocalPrediction and grid and grid[y] then grid[y][x] = id end
     return true
 end
 
@@ -8300,7 +8301,19 @@ local function placeBuild(t, s)
         skipTile(Build.Skip, t.idx, 120)
         return false
     end
-    if not sendSetTile("fg", t.x, t.y, id) then return false end
+    local dirt = Build.DirtRun
+    if not sendSetTile("fg", t.x, t.y, id, dirt ~= nil) then return false end
+    if dirt then
+        local deadline = os.clock() + 0.75
+        while fgIdAt(t.x, t.y) == 0 and os.clock() < deadline do
+            task.wait(0.05)
+            if not Build.Running or Build.DirtRun ~= dirt or not Build.dirtWorldMatches(dirt) then return false end
+        end
+        if fgIdAt(t.x, t.y) ~= id then
+            skipTile(Build.Skip, t.idx, 5)
+            return false
+        end
+    end
     pcall(function() Refs.Inv:remove(id, 1) end)
     Build.Placed += 1
     Build.Status = ("Pasang %s (%d,%d)"):format(itemName(id), t.x, t.y)
@@ -8673,19 +8686,27 @@ function Build.placeStep(P, live)
     for kk = P.K, 1, -1 do
         local y = P.rows[kk]
         local list = {}
+        local incomplete = false
         for _, x in ipairs(P.cols[kk]) do
             local idx = y * W + x
-            if not Build.done(x, y) and not skipped(Build.Skip, idx, now) then
-                list[#list + 1] = { x = x, y = y, idx = idx }
+            if not Build.done(x, y) then
+                incomplete = true
+                if not skipped(Build.Skip, idx, now) then
+                    list[#list + 1] = { x = x, y = y, idx = idx }
+                end
             end
         end
         if #list > 0 then
             k, T = kk, list
             break
         end
+        if P.dirt and incomplete then return "none" end
     end
     if not k then return "none" end
     local y = P.rows[k]
+    if P.dirt then
+        Build.Phase = ("Pasang Dirt dari bawah: baris %d/%d (Y %d)"):format(P.K - k + 1, P.K, y)
+    end
     local px = s.x
     table.sort(T, function(a, b) return abs(a.x + 0.5 - px) < abs(b.x + 0.5 - px) end)
     local _, sy = startNode(s)
@@ -9115,14 +9136,14 @@ local function buildLoop(runId, dirt)
 
         -- 1) GALI dulu sampai bawah
         local r = "none"
-        if #carve > 0 then
+        if #carve > 0 and not (dirt and o.dugSwept and info.need > 0) then
             Build.Reserve = 0
             Build.Phase = ("Gali: sisa %d tile"):format(#carve)
             r = Build.carveStep(P, carve, live)
             if not live() then break end
             if r ~= "none" then noneAt = nil end
         end
-        if r == "none" and #carve == 0 and not o.dugSwept then
+        if r == "none" and (#carve == 0 or dirt) and not o.dugSwept then
             -- gali selesai: ambil dulu semua drop sisa galian, per baris
             o.dugSwept, o.sweptAt = true, os.clock()
             Build.Phase = "Bersihkan drop sisa galian (per baris)"
@@ -9153,6 +9174,20 @@ local function buildLoop(runId, dirt)
                 Build.Phase = "Bersihkan drop di lahan (per baris)"
                 Build.sweep(P, live, nil, 900)
                 if not live() then break end
+                if dirt then
+                    -- Tunggu pembaruan tile terakhir dan cek lagi seluruh lantai dari bawah sampai atas.
+                    task.wait(0.65)
+                    if not live() then break end
+                    carve, kept = Build.carveList(P, live)
+                    if not live() then break end
+                    info = landInfo(P, carve)
+                    info.kept = kept
+                    Build.DirtInfo = info
+                    if info.need > 0 then
+                        phase, o.placeNeed = nil, nil
+                        continue
+                    end
+                end
                 local note = (#carve > 0) and (", " .. #carve .. " tile gali dilewati") or ""
                 if dirt then
                     local remaining = #carve + kept
