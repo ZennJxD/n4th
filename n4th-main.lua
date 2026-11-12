@@ -9,7 +9,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = nama versi l
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-12-itemdb-active-refs-1"
+Session.Build = "2026-11-12-register-budget-1"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -10296,6 +10296,7 @@ end))
 ---------------------------------------------------------------------
 -- GUI TAMBAHAN: Grid Tile 5x5 + tombol Fly ▲/▼
 ---------------------------------------------------------------------
+do (function() -- Sisakan register chunk utama untuk compiler tanpa optimisasi.
 local guiParent
 if type(gethui) == "function" then
     local ok, parent = pcall(gethui)
@@ -10615,6 +10616,7 @@ end
 
 flyButton("▲", -40, function(v) Misc.UpHeld = v end)
 flyButton("▼", 40, function(v) Misc.DownHeld = v end)
+end)() end
 
 ---------------------------------------------------------------------
 -- UI WINDUI
@@ -10864,7 +10866,7 @@ do
         controls:Button({
             Title = "Buka Grid Tile",
             Desc = "Kotak 5x5, tengah = karakter",
-            Callback = function() UI.setGridMode("farm") GridGui.Enabled = true end,
+            Callback = function() UI.setGridMode("farm") UI.GridGui.Enabled = true end,
         })
     end)
 
@@ -11112,7 +11114,7 @@ do (function()
             Title = "Pilih tile drop",
             Desc = "Pilih satu tile di grid 5x5. Tile disimpan sebagai posisi berdiri di world ini.",
             Callback = function()
-                if UI.setGridMode("autodrop") then GridGui.Enabled = true end
+                if UI.setGridMode("autodrop") then UI.GridGui.Enabled = true end
             end,
         })
     end)
@@ -15313,8 +15315,8 @@ Session.Cleanup = function()
         if Misc.Ghost then pcall(function() Refs.World.ghost = false end) end
         if Misc.Speed ~= 100 then pcall(function() Refs.World.speedScale = 1 end) end
     end
-    pcall(function() GridGui:Destroy() end)
-    pcall(function() FlyPad:Destroy() end)
+    pcall(function() UI.GridGui:Destroy() end)
+    pcall(function() UI.FlyPad:Destroy() end)
     pcall(function() Window:Destroy() end)
 end
 
