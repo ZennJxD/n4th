@@ -9,7 +9,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = nama versi l
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-12-itemdb-reconnect-1"
+Session.Build = "2026-11-12-itemdb-runtime-functions-1"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -337,26 +337,39 @@ do
         end
         return false
     end
-    local bindingTried, boundDatabase = false, nil
+    local bindingAt, boundDatabase = -math.huge, nil
+    local function recordItemDatabase(results, value, object)
+        if isItemDatabase(value) then
+            rememberMatch(results, "ItemDB", value, object)
+            return
+        end
+        for _, key in ipairs({ "ItemDB", "Items", "items", "ItemsById", "ById", "byId" }) do
+            local nested = rawget(value, key)
+            if type(nested) == "table" and isItemDatabase(nested) then
+                rememberMatch(results, "ItemDB", nested, object)
+            end
+        end
+    end
+    local function inspectAction(results, fn, depth, visited)
+        if depth > 3 or visited[fn] then return end
+        visited[fn] = true
+        for _, value in pairs(readUpvalues(fn)) do
+            if type(value) == "table" then
+                pcall(recordItemDatabase, results, value)
+            elseif type(value) == "function" then
+                inspectAction(results, value, depth + 1, visited)
+            end
+        end
+    end
     local function databaseFromActions()
-        if bindingTried then return boundDatabase end
-        bindingTried = true
+        if boundDatabase or os.clock() - bindingAt < 2 then return boundDatabase end
+        bindingAt = os.clock()
         if type(getconnections) ~= "function" then return nil end
         local queue, seen, results = {}, {}, {}
         local function push(value)
             if (type(value) == "function" or type(value) == "table") and not seen[value] then
                 seen[value] = true
                 queue[#queue + 1] = value
-            end
-        end
-        local function inspectAction(fn, depth, visited)
-            if depth > 3 or visited[fn] then return end
-            visited[fn] = true
-            for _, value in pairs(readUpvalues(fn)) do
-                if type(value) == "table" then
-                    local ok, yes = pcall(isItemDatabase, value)
-                    if ok and yes then rememberMatch(results, "ItemDB", value) end
-                elseif type(value) == "function" then inspectAction(value, depth + 1, visited) end
             end
         end
         for _, entry in ipairs({ { RunService, { "RenderStepped", "Heartbeat", "PreRender", "Stepped" } },
@@ -379,7 +392,7 @@ do
             local value = queue[index]
             index += 1
             if type(value) == "function" then
-                if actionFunction(value) then inspectAction(value, 0, {}) end
+                if actionFunction(value) then inspectAction(results, value, 0, {}) end
                 for _, upvalue in pairs(readUpvalues(value)) do push(upvalue) end
             elseif not isItemDatabase(value) then
                 for _, member in pairs(value) do if type(member) == "function" then push(member) end end
@@ -399,8 +412,12 @@ do
     local function inspectValue(target, value, object)
         if type(value) ~= "table" then return end
         for _, name in ipairs(structuralNames) do
-            local ok, yes = pcall(matches, name, value)
-            if ok and yes then rememberMatch(target, name, value, object) end
+            if object and name == "ItemDB" then
+                pcall(recordItemDatabase, target, value, object)
+            else
+                local ok, yes = pcall(matches, name, value)
+                if ok and yes then rememberMatch(target, name, value, object) end
+            end
         end
     end
     local filteredMatches, filteredTried = {}, false
@@ -435,19 +452,37 @@ do
         if os.clock() - lastGC < 3 or type(getgc) ~= "function" then return end
         lastGC = os.clock()
         local ok, objects = pcall(getgc, true)
-        if not ok or type(objects) ~= "table" then ok, objects = pcall(getgc) end
+        if not ok or type(objects) ~= "table" or not next(objects) then ok, objects = pcall(getgc) end
         if not ok or type(objects) ~= "table" then return end
         runtimeMatches = {}
         runtimeComplete = true
-        local visited = 0
+        local visited, actionCandidates = 0, {}
+        local budget = { next = os.clock() + 0.0015 }
         for _, value in pairs(objects) do
             if not alive() or os.clock() >= moduleDeadline then runtimeComplete = false break end
             if type(value) == "table" then
                 Session.ModuleScan.Tables += 1
                 inspectValue(runtimeMatches, value)
+            elseif type(value) == "function" and #actionCandidates < 2000 then
+                actionCandidates[#actionCandidates + 1] = value
             end
             visited += 1
-            if visited % 1000 == 0 then task.wait() end
+            Session.scanStep(budget, visited)
+        end
+        -- Sebagian executor mengembalikan fungsi saja walaupun getgc(true) diterima.
+        if not runtimeMatches.ItemDB and not boundDatabase then
+            local results, seenActions = {}, {}
+            for index, fn in ipairs(actionCandidates) do
+                if not alive() or os.clock() >= moduleDeadline then break end
+                if actionFunction(fn) then inspectAction(results, fn, 0, seenActions) end
+                Session.scanStep(budget, index)
+            end
+            local match = results.ItemDB
+            local validated = match and (not match.Ambiguous and match or resolveDatabase(match))
+            if validated then
+                boundDatabase = validated.Value
+                Session.ModuleScan.DatabaseResolution = "upvalue fungsi punch/place dari getgc"
+            end
         end
         lastGC = os.clock()
     end
@@ -503,6 +538,10 @@ do
                 local bound = databaseFromActions()
                 if bound then return bound end
             end
+        end
+        if name == "ItemDB" then
+            local active = databaseFromActions()
+            if active then return active end
         end
         scanRuntime(retry)
         local found = runtimeMatches[name]
@@ -600,6 +639,7 @@ do
         if Session.ItemScan then return false end
         Session.ItemScan = true
         moduleDeadline, lastGC = os.clock() + 12, -math.huge
+        bindingAt, boundDatabase = -math.huge, nil
         runtimeComplete, exportsComplete, filteredTried = false, false, false
         runtimeMatches, exportMatches, triedModules, filteredMatches = {}, {}, {}, {}
         local ok, reason = pcall(function()
