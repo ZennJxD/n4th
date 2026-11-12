@@ -9,7 +9,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = nama versi l
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-12-itemdb-runtime-functions-1"
+Session.Build = "2026-11-12-world-reconnect-1"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -2413,15 +2413,22 @@ local function isGameFn(fn)
     return true
 end
 
-function Anim.consider(v, trusted)
+function Anim.isWorld(v)
+    local w, h = rawget(v, "w"), rawget(v, "h")
+    if type(w) ~= "number" or w <= 0 or type(h) ~= "number" or h <= 0
+        or type(rawget(v, "fg")) ~= "table" or type(rawget(v, "bg")) ~= "table" then return false end
+    return rawget(v, "spawn") ~= nil or (
+        type(rawget(v, "name")) == "string"
+        and type(rawget(v, "atTile")) == "function"
+        and (type(rawget(v, "dropList")) == "function" or type(rawget(v, "enter")) == "function")
+    )
+end
+
+function Anim.consider(v)
     local tv = type(v)
     if tv == "table" then
         if not Refs.World then
-            local ok, isWorld = pcall(function()
-                return type(rawget(v, "fg")) == "table" and type(rawget(v, "bg")) == "table"
-                    and type(rawget(v, "w")) == "number" and type(rawget(v, "h")) == "number"
-                    and rawget(v, "spawn") ~= nil
-            end)
+            local ok, isWorld = pcall(Anim.isWorld, v)
             if ok and isWorld then Refs.World = v end
         end
         if not Refs.Inv then
@@ -2465,7 +2472,7 @@ function Anim.consider(v, trusted)
             end)
             if ok and isP and not table.find(Refs.Particles, v) then table.insert(Refs.Particles, v) end
         end
-    elseif tv == "function" and (not Refs.SetTile or not Refs.Punch) and v ~= isPunchFn and v ~= isSetTileFn and (trusted or isGameFn(v)) then
+    elseif tv == "function" and (not Refs.SetTile or not Refs.Punch) and isGameFn(v) then
         if not Refs.SetTile and isSetTileFn(v) then
             Refs.SetTile = v
         elseif not Refs.Punch and isPunchFn(v) then
@@ -2474,28 +2481,90 @@ function Anim.consider(v, trusted)
     end
 end
 
+-- World dan inventori kadang hanya bisa dicapai dari closure game, termasuk
+-- pada executor yang mengembalikan fungsi saja dari getgc.
+function Anim.walkRefs(roots, limit)
+    local queue, seen = {}, {}
+    local function push(value)
+        local kind = type(value)
+        if #queue < limit and (kind == "function" or kind == "table") and not seen[value] then
+            seen[value] = true
+            queue[#queue + 1] = value
+        end
+    end
+    for _, root in ipairs(roots) do push(root) end
+    local fields = { "World", "world", "currentWorld", "activeWorld", "inventory", "inv", "controller", "state" }
+    local budget = { next = os.clock() + 0.0015 }
+    local index = 1
+    while index <= #queue and alive() do
+        local value = queue[index]
+        Anim.consider(value)
+        if Refs.Inv and Refs.World and Refs.Punch and Refs.SetTile and Refs.State and Refs.Menu then break end
+        if type(value) == "function" then
+            if isGameFn(value) then
+                for _, upvalue in pairs(getUpvalues(value)) do push(upvalue) end
+            end
+        elseif value ~= ItemDB and value ~= Session.ItemDBSource and value ~= InventoryModule then
+            for _, key in ipairs(fields) do push(rawget(value, key)) end
+            local checked = 0
+            for _, member in pairs(value) do
+                if type(member) == "function" then push(member) end
+                checked += 1
+                if checked >= 256 or #queue >= limit then break end
+            end
+        end
+        Session.scanStep(budget, index)
+        index += 1
+    end
+    return math.min(index, #queue)
+end
+
 local function findRefs()
-    if not Session.ItemDBSource then return false end
     -- Reconnect sudah mengosongkan referensi lama. Pertahankan hasil koneksi input aktif.
     Refs.ScanCount, Refs.ScanError = 0, nil
+    local filter = filtergc or filter_gc
+    if not Refs.World and type(filter) == "function" then
+        local ok, worlds = pcall(filter, "table", { Keys = { "fg", "bg", "w", "h" } }, false)
+        if ok and type(worlds) == "table" then
+            for _, world in pairs(worlds) do
+                if type(world) == "table" then Anim.consider(world) end
+                if Refs.World then break end
+            end
+        end
+    end
+    if Refs.World and Refs.Inv and Refs.SetTile and Refs.State and Refs.Punch
+        and Refs.Menu and Refs.Gems and Refs.Hud and Refs.Others then return true end
     if type(getgc) ~= "function" then
         Refs.ScanError = "Executor tidak punya getgc()"
         return Refs.World ~= nil, Refs.ScanError
     end
     local gcOk, objects = pcall(getgc, true)
-    if not gcOk or type(objects) ~= "table" then gcOk, objects = pcall(getgc) end
+    if not gcOk or type(objects) ~= "table" or not next(objects) then gcOk, objects = pcall(getgc) end
     if not gcOk or type(objects) ~= "table" then
         Refs.ScanError = "getgc gagal: " .. tostring(objects)
         return Refs.World ~= nil, Refs.ScanError
     end
     -- Hasil getgc executor dapat berlubang atau memakai key non-urutan.
     -- ipairs berhenti di lubang pertama dan melewatkan objek yang masih valid.
+    local roots = {}
+    local budget = { next = os.clock() + 0.0015 }
     for _, v in pairs(objects) do
+        if not alive() then return false end
         Refs.ScanCount += 1
         Anim.consider(v)
         if Refs.World and Refs.Inv and Refs.SetTile and Refs.State and Refs.Punch
             and Refs.Menu and Refs.Gems and Refs.Hud and Refs.Others then break end
-        if Refs.ScanCount % 2000 == 0 then task.wait() end
+        if (not Refs.World or not Refs.Inv) and type(v) == "function" and #roots < 1100 and isGameFn(v) then
+            roots[#roots + 1] = v
+        end
+        Session.scanStep(budget, Refs.ScanCount)
+    end
+    if not Refs.World or not Refs.Inv then
+        local actions = {}
+        if Refs.Punch then actions[#actions + 1] = Refs.Punch end
+        if Refs.SetTile then actions[#actions + 1] = Refs.SetTile end
+        Anim.walkRefs(actions, 300)
+        if not Refs.World or not Refs.Inv then Anim.walkRefs(roots, 2400) end
     end
     return Refs.World ~= nil
 end
@@ -2970,17 +3039,17 @@ function Anim.findFast()
     return false
 end
 
--- Cari data world & isi tas cepat: telusuri upvalue fungsi game yang terhubung ke RunService
--- (fungsi gambar / update game memegang tabel-tabel itu). Maks 400 fungsi, tanpa getgc.
+-- Prioritaskan closure dari koneksi aktif agar world lama di heap tidak terpilih.
 function Anim.quickRefs()
-    if not Session.ItemDBSource then return false end
     if type(getconnections) ~= "function" then return false end
-    local queue, seen, n = {}, {}, 0
-    local function push(value)
-        local kind = type(value)
-        if (kind == "function" or kind == "table") and not seen[value] then
-            seen[value] = true
-            queue[#queue + 1] = value
+    local roots = {}
+    local function readSignal(signal)
+        local ok, connections = pcall(getconnections, signal)
+        if ok and type(connections) == "table" then
+            for _, connection in pairs(connections) do
+                local read, fn = pcall(Session.connectionFunction, connection)
+                if read and type(fn) == "function" and isGameFn(fn) then roots[#roots + 1] = fn end
+            end
         end
     end
     for _, entry in ipairs({
@@ -2989,35 +3058,24 @@ function Anim.quickRefs()
     }) do
         for _, name in ipairs(entry[2]) do
             local okS, sig = pcall(function() return entry[1][name] end)
-            if okS and sig then
-                local ok, conns = pcall(getconnections, sig)
-                if ok and type(conns) == "table" then
-                    for _, connection in pairs(conns) do
-                        local okf, fn = pcall(Session.connectionFunction, connection)
-                        if okf then push(fn) end
+            if okS and sig then readSignal(sig) end
+        end
+    end
+    Refs.ConnectionCount = Anim.walkRefs(roots, 900)
+    if not Refs.World then
+        table.clear(roots)
+        local folders = { ReplicatedStorage:FindFirstChild("WorldRemotes") or false, ReplicatedStorage }
+        for _, folder in ipairs(folders) do
+            if folder then
+                for _, remote in ipairs(folder:GetChildren()) do
+                    if remote:IsA("RemoteEvent") or remote:IsA("UnreliableRemoteEvent") then
+                        readSignal(remote.OnClientEvent)
                     end
                 end
             end
         end
+        Refs.ConnectionCount += Anim.walkRefs(roots, 900)
     end
-    -- World/tas bisa ditemukan lebih dulu; tetap lanjut sampai fungsi aksi juga ditemukan.
-    local i = 1
-    while i <= #queue and n < 900 do
-        local value = queue[i]
-        i, n = i + 1, n + 1
-        Anim.consider(value, true)
-        if Refs.Inv and Refs.World and Refs.Punch and Refs.SetTile and Refs.State and Refs.Menu then break end
-        if type(value) == "function" then
-            for _, upvalue in pairs(getUpvalues(value)) do push(upvalue) end
-        elseif value ~= ItemDB and value ~= Session.ItemDBSource and value ~= InventoryModule then
-            -- Fungsi game kadang tersimpan sebagai field controller, bukan langsung di GC.
-            for _, member in pairs(value) do
-                if type(member) == "function" then push(member) end
-            end
-        end
-        if n % 100 == 0 then task.wait() end
-    end
-    Refs.ConnectionCount = n
     return Refs.Inv ~= nil
 end
 
@@ -14644,15 +14702,7 @@ Box.ConnLang = box(ConnTab, "Bahasa / Language", false)
 safe(function()
     UI.RefInfo = Box.ConnMain:Paragraph({ Title = "Referensi game", Desc = refsText() })
 end)
-local function reconnect(show)
-    if Session.ItemScan then return false end
-    if not Session.resolveItems() then
-        local message = "Data item belum terbaca. Tekan Hubungkan ke game untuk coba lagi."
-        pcall(function() UI.RefInfo:SetDesc(refsText() .. "\n" .. I18N.T(message)) end)
-        if show then notify(show, message, 5) end
-        return false
-    end
-    Session.bindMovement()
+function Session.refreshGameRefs(show)
     -- hentikan Clear / Farmer dulu
     if Clear.Running then stopClear("Dihentikan: hubungkan ulang ke game") end
     if Farmer.Running then stopFarmer("Dihentikan: hubungkan ulang ke game") end
@@ -14663,18 +14713,37 @@ local function reconnect(show)
     Refs.SetTile, Refs.State, Refs.Punch, Refs.Menu = nil, nil, nil, nil
     Refs.Gems, Refs.Hud, Refs.Others, Refs.Arm = nil, nil, nil, nil
     Refs.Particles, Anim.Particles = {}, nil
+    Refs.Trees, Refs.TreeMode, Refs.TreeP = nil, nil, nil
+    Drops.list, Drops.update = nil, nil
+    Refs.ConnectionCount = 0
     -- 1) cari isi tas cepat lalu langsung isi dropdown (tidak menunggu scan getgc yang lama)
-    if pcall(Anim.quickRefs) and Refs.Inv then
+    pcall(Anim.quickRefs)
+    if Refs.Inv and Session.ItemDBSource then
         pcall(doInvRefresh, true)
         task.wait() -- biar dropdown tampil dulu sebelum scan lengkap (scan menahan layar sebentar)
     end
-    -- 2) scan lengkap
+    -- Saat pindah world, tunggu koneksi baru sebelum mengambil kandidat dari heap.
+    if not Refs.World and type(getconnections) == "function" then
+        for _ = 1, 4 do
+            task.wait(0.5)
+            if not alive() then return false end
+            pcall(Anim.quickRefs)
+            if Refs.World then break end
+        end
+    end
+    if not alive() then return false end
     findRefs()
+    if not alive() then return false end
     if Refs.ScanError then warn("[n4th] " .. Refs.ScanError) end
+    local itemsReady = Session.resolveItems()
+    if not alive() then return false end
+    Session.bindMovement()
     watchInventory()
     pcall(doInvRefresh, true) -- langsung di thread ini (thread INIT / antrian UI), bukan thread tombol
-    findDropRefs(true)
-    Auto.findTreeRefs()
+    if Refs.World then
+        findDropRefs(true)
+        Auto.findTreeRefs()
+    end
     table.clear(DropFailUntil)
     Anim.fn, Anim.idx = nil, nil
     pcall(Anim.findFast)
@@ -14682,9 +14751,26 @@ local function reconnect(show)
     if Misc.InfJump then hookJammer() end
     pcall(function() UI.RefInfo:SetDesc(refsText()) end)
     updateStatus()
-    print("[n4th] " .. Session.Build .. " | scanned=" .. tostring(Refs.ScanCount) .. " | " .. refsText())
+    print("[n4th] " .. Session.Build .. " | scanned=" .. tostring(Refs.ScanCount)
+        .. " | callbacks=" .. tostring(Refs.ConnectionCount or 0) .. " | " .. refsText())
+    if show then
+        local message = refsText()
+        if not Refs.World then message = I18N.T("Data world belum ketemu. Tekan 'Hubungkan ke game'") .. "\n" .. message end
+        notify(show, message, 5)
+    end
+    return Refs.World ~= nil and itemsReady
+end
+
+local function reconnect(show)
+    if Session.Connecting then return false end
+    Session.Connecting = true
+    local ok, connected = pcall(Session.refreshGameRefs, show)
+    Session.Connecting = false
+    if ok then return connected end
+    warn("[n4th] Koneksi game: " .. tostring(connected))
+    pcall(function() UI.RefInfo:SetDesc(refsText()) end)
     if show then notify(show, refsText(), 5) end
-    return true
+    return false
 end
 
 safe(function()
@@ -15045,6 +15131,7 @@ task.spawn(function()
             for attempt = 1, 5 do
                 task.wait(2)
                 if not alive() or Refs.Punch then return end
+                if Session.Connecting then continue end
                 pcall(Anim.quickRefs)
                 if attempt == 3 and not Refs.Punch then pcall(findRefs) end
                 if Refs.Inv then pcall(watchInventory) end
