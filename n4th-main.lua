@@ -9,7 +9,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = nama versi l
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-12-windui-icon-frame-1"
+Session.Build = "2026-11-12-itemdb-reconnect-1"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -19,6 +19,7 @@ local getgc = getgc or get_gc_objects
 local getmodules = getmodules or get_modules
 local gethui = gethui or get_hidden_gui
 local getconnections = getconnections or get_connections
+local getloadedmodules = getloadedmodules or get_loaded_modules
 function Session.connectionFunction(connection)
     if type(connection) == "function" then return connection end
     local ok, fn = pcall(function() return connection.Function end)
@@ -200,7 +201,7 @@ do
             tostring(game.PlaceId), tostring(game.PlaceVersion), table.concat(folders, ", "):sub(1, 900),
             #indexed, table.concat(names, ", "):sub(1, 1400), type(getloadedmodules), type(getmodules))
     end
-    local moduleDeadline = os.clock() + 30
+    local moduleDeadline = os.clock() + 5
     local structuralNames = { "ItemDB", "Inventory", "Net", "WorldMenu", "Roles", "Sfx" }
     local runtimeMatches, exportMatches, triedModules = {}, {}, {}
     local lastGC, runtimeComplete, exportsComplete = -math.huge, false, false
@@ -563,7 +564,7 @@ do
                 return true, recovered, recoveredObject
             end
         end
-        local message = "[n4th] Modul " .. name .. ": " .. (reason or (required and "tidak ditemukan setelah pencarian 30 detik" or "tidak ditemukan"))
+        local message = "[n4th] Modul " .. name .. ": " .. (reason or "tidak ditemukan")
         if required then
             Session.BootstrapReport = report()
             warn("[n4th] Struktur client: " .. Session.BootstrapReport)
@@ -580,8 +581,9 @@ do
     end
     WorldRemotes = ReplicatedStorage:FindFirstChild("WorldRemotes")
     SetTileRemote = WorldRemotes and WorldRemotes:FindFirstChild("SetTile")
-    local _, itemDB, itemModule = loadModule(Shared, "ItemDB", true)
+    local _, itemDB, itemModule = loadModule(Shared, "ItemDB", false)
     ItemDB = itemDB
+    if itemDB then moduleDeadline = os.clock() + 8 end
     -- Modul yang terpisah folder tetap bisa dicari melalui indeks client.
     Shared = (itemModule and itemModule.Parent) or Shared
     local _, inventory = loadModule(Shared, "Inventory", false)
@@ -593,6 +595,30 @@ do
     if not GameGui and menuObject then GameGui = menuObject.Parent end
     RolesOk, RolesModule = loadModule(Shared, "Roles", false)
     SfxOk, SfxModule = loadModule(Shared, "Sfx", false)
+    function Session.resolveItems()
+        if Session.ItemDBSource then return true end
+        if Session.ItemScan then return false end
+        Session.ItemScan = true
+        moduleDeadline, lastGC = os.clock() + 12, -math.huge
+        runtimeComplete, exportsComplete, filteredTried = false, false, false
+        runtimeMatches, exportMatches, triedModules, filteredMatches = {}, {}, {}, {}
+        local ok, reason = pcall(function()
+            GameGui = PlayerGui:FindFirstChild("GameGui") or GameGui
+            refreshIndex()
+            local _, value, object = loadModule(Shared, "ItemDB", true)
+            Shared = (object and object.Parent) or Shared
+            if not InventoryModule then
+                local _, inventory = loadModule(Shared, "Inventory", false)
+                InventoryModule = inventory
+            end
+            if not NetOk then NetOk, Net = loadModule(Shared, "Net", false) end
+            if not MenuModOk then MenuModOk, MenuModule = loadModule(GameGui, "WorldMenu", false) end
+            Session.ItemDBSource = value
+        end)
+        Session.ItemScan = false
+        if not ok then warn("[n4th] Pencarian ItemDB: " .. tostring(reason)) end
+        return Session.ItemDBSource ~= nil
+    end
     Session.InitStep = "modul game siap"
 end
 
@@ -602,7 +628,8 @@ do
     local source = ItemDB
     Session.ItemDBSource = source
     ItemDB = setmetatable({}, { __index = function(cache, id)
-        local item = source[id]
+        local database = Session.ItemDBSource
+        local item = database and database[id]
         if type(item) ~= "table" then return item end
         local copy = {}
         for key, value in pairs(item) do copy[key] = value end
@@ -1081,6 +1108,8 @@ local I18N = { Lang = "id", Saved = "id", Ask = false, Chosen = false }
 do (function() -- fungsi sendiri: variabel di dalam tidak ikut batas 200 local
 
 I18N.EN = {
+    ["Data item belum terbaca. Tekan Hubungkan ke game untuk coba lagi."] =
+        "Item data is unavailable. Press Connect to game to retry.",
     ["Isi ulang Dirt dari drop atau Dirt Seed, lalu lanjut pasang."] = "Refill Dirt from drops or Dirt Seeds, then resume building.",
     ["Ambil Dirt dan Dirt Seed di lahan"] = "Collecting Dirt and Dirt Seeds in the farm",
     ["Data pohon belum terbaca. Hubungkan ulang ke game untuk isi ulang Dirt."] =
@@ -2406,6 +2435,7 @@ function Anim.consider(v, trusted)
 end
 
 local function findRefs()
+    if not Session.ItemDBSource then return false end
     -- Reconnect sudah mengosongkan referensi lama. Pertahankan hasil koneksi input aktif.
     Refs.ScanCount, Refs.ScanError = 0, nil
     if type(getgc) ~= "function" then
@@ -2431,7 +2461,8 @@ local function findRefs()
 end
 
 local function refsText()
-    return "World: " .. (Refs.World and "OK" or "TIDAK")
+    return "ItemDB: " .. (Session.ItemDBSource and "OK" or "TIDAK")
+        .. " | World: " .. (Refs.World and "OK" or "TIDAK")
         .. " | Inventori: " .. (Refs.Inv and "OK" or "TIDAK")
         .. " | setTile: " .. (Refs.SetTile and "OK" or "cadangan")
         .. " | Posisi: " .. (Refs.State and "OK" or "cadangan")
@@ -2902,6 +2933,7 @@ end
 -- Cari data world & isi tas cepat: telusuri upvalue fungsi game yang terhubung ke RunService
 -- (fungsi gambar / update game memegang tabel-tabel itu). Maks 400 fungsi, tanpa getgc.
 function Anim.quickRefs()
+    if not Session.ItemDBSource then return false end
     if type(getconnections) ~= "function" then return false end
     local queue, seen, n = {}, {}, 0
     local function push(value)
@@ -3485,14 +3517,18 @@ local function isDownWrapper(saved, key, ...)
     return OrigIsDown(saved, key, ...)
 end
 
-if MenuModOk and type(MenuModule) == "table" and type(rawget(MenuModule, "isDown")) == "function" then
-    OrigIsDown = rawget(MenuModule, "isDown")
+function Session.bindMovement()
+    if OrigIsDown or not MenuModOk or type(MenuModule) ~= "table" then return end
+    local original = rawget(MenuModule, "isDown")
+    if type(original) ~= "function" then return end
+    OrigIsDown = original
     local ok, reason = pcall(function() MenuModule.isDown = isDownWrapper end)
     if not ok then
         OrigIsDown = nil
         warn("[n4th] Kontrol gerak tidak bisa dihubungkan: " .. tostring(reason))
     end
 end
+Session.bindMovement()
 
 -- Pasang walkspeed & fly tiap frame (game bisa menimpanya)
 table.insert(Connections, RunService.Heartbeat:Connect(function()
@@ -8430,6 +8466,7 @@ local function overlapsPlayer(x, y, s)
 end
 
 function Build.dirtBlock()
+    if not Session.ItemDBSource then return nil end
     if Build.DirtId ~= nil then return Build.DirtId or nil end
     for id, item in pairs(Session.ItemDBSource) do
         if type(id) == "number" and type(item) == "table" and item.solid and item.kind ~= "seed"
@@ -14565,9 +14602,17 @@ Box.ConnCfg = box(ConnTab, "Config", false)
 Box.ConnLang = box(ConnTab, "Bahasa / Language", false)
 
 safe(function()
-    UI.RefInfo = Box.ConnMain:Paragraph({ Title = "Referensi game", Desc = "-" })
+    UI.RefInfo = Box.ConnMain:Paragraph({ Title = "Referensi game", Desc = refsText() })
 end)
 local function reconnect(show)
+    if Session.ItemScan then return false end
+    if not Session.resolveItems() then
+        local message = "Data item belum terbaca. Tekan Hubungkan ke game untuk coba lagi."
+        pcall(function() UI.RefInfo:SetDesc(refsText() .. "\n" .. I18N.T(message)) end)
+        if show then notify(show, message, 5) end
+        return false
+    end
+    Session.bindMovement()
     -- hentikan Clear / Farmer dulu
     if Clear.Running then stopClear("Dihentikan: hubungkan ulang ke game") end
     if Farmer.Running then stopFarmer("Dihentikan: hubungkan ulang ke game") end
@@ -14599,6 +14644,7 @@ local function reconnect(show)
     updateStatus()
     print("[n4th] " .. Session.Build .. " | scanned=" .. tostring(Refs.ScanCount) .. " | " .. refsText())
     if show then notify(show, refsText(), 5) end
+    return true
 end
 
 safe(function()
@@ -14952,9 +14998,9 @@ task.spawn(function()
     local readyDeadline = os.clock() + 12
     while alive() and LocalPlayer:GetAttribute("GameReady") ~= true and os.clock() < readyDeadline do task.wait(0.25) end
     if not alive() then return end
-    reconnect("n4th v2.0")
+    local connected = reconnect("n4th v2.0")
     -- Input dapat tersambung belakangan pada executor yang mulai sebelum client game selesai.
-    if not Refs.Punch then
+    if connected and not Refs.Punch then
         task.spawn(function()
             for attempt = 1, 5 do
                 task.wait(2)
@@ -14975,7 +15021,7 @@ task.spawn(function()
     end
     -- Penjaga dari config dinyalakan setelah data pemain ketemu
     -- (supaya pemain yang sudah ada dicatat dulu)
-    if Config.saved("Penjaga", "On") == true and alive() then
+    if connected and Config.saved("Penjaga", "On") == true and alive() then
         if UI.GuardToggle then pcall(function() UI.GuardToggle:Set(true) end) end
         if not Guard.On then Guard.set(true) end
     end
@@ -14985,7 +15031,7 @@ task.spawn(function()
         Config.save(true)
     end
     -- Finder mendapat prioritas supaya catatan rejoin farming tidak memindahkan world lagi.
-    if not WorldFinder.startup(reconnect) then Rejoin.startup(reconnect) end
+    if connected and not WorldFinder.startup(reconnect) then Rejoin.startup(reconnect) end
 end)
 
 task.spawn(function()
