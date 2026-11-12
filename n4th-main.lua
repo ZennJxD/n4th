@@ -9,7 +9,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = nama versi l
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-12-windui-icon-startup-1"
+Session.Build = "2026-11-12-windui-icon-frame-1"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -639,9 +639,10 @@ local function protectgui() end
         search = "rbxassetid://121018724060431",
         sprout = "rbxassetid://100091687832508",
     }
+    local newIconFrame
     local iconModule = {
         SetIconsType = function() end,
-        Init = function() end,
+        Init = function(create) newIconFrame = create end,
         AddIcons = function(_, pack)
             for name, asset in pairs(pack) do
                 if type(asset) == "string" then icons[name] = asset end
@@ -653,6 +654,19 @@ local function protectgui() end
             return { icons[key] or "", { ImageRectSize = Vector2.new(), ImageRectPosition = Vector2.new() } }
         end,
     }
+    function iconModule.Image(config)
+        local image = iconModule.Icon2(config.Icon)
+        local color = config.Colors and config.Colors[1]
+        return {
+            IconFrame = newIconFrame("ImageLabel", {
+                Size = config.Size,
+                BackgroundTransparency = 1,
+                Image = image and image[1] or "",
+                ImageColor3 = typeof(color) == "Color3" and color or nil,
+                ThemeTag = type(color) == "string" and { ImageColor3 = color } or nil,
+            }),
+        }
+    end
     local loadedIcons = false
     task.spawn(function()
         local ok, pack = pcall(function()
