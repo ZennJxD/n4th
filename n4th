@@ -4,6 +4,17 @@ local repository = "ZennJxD/n4th"
 local httpService = game:GetService("HttpService")
 local lastError = "respons kosong"
 
+local function reportFailure(message)
+    pcall(function()
+        game:GetService("StarterGui"):SetCore("SendNotification", {
+            Title = "n4th gagal dimuat",
+            Text = message:sub(1, 180),
+            Duration = 8,
+        })
+    end)
+    error(message, 0)
+end
+
 local function download(url)
     local lastError = "respons kosong"
     local function checked(source)
@@ -19,7 +30,8 @@ local function download(url)
         lastError = reason
     else lastError = tostring(source) end
     local seen = {}
-    for _, api in ipairs({ request or false, http_request or false, (syn and syn.request) or false, (http and http.request) or false }) do
+    for _, api in ipairs({ request or false, http_request or false, syn_request or false,
+        (syn and syn.request) or false, (http and http.request) or false, (fluxus and fluxus.request) or false }) do
         if type(api) == "function" and not seen[api] then
             seen[api] = true
             local sent, response = pcall(api, { Url = url, Method = "GET" })
@@ -32,14 +44,25 @@ local function download(url)
                     if valid then return valid end
                     lastError = reason
                 end
+            elseif sent and type(response) == "string" then
+                local valid, reason = checked(response)
+                if valid then return valid end
+                lastError = reason
             else lastError = tostring(response) end
         end
+    end
+    local fetched, fallback = pcall(function() return httpService:GetAsync(url) end)
+    if fetched then
+        local valid, reason = checked(fallback)
+        if valid then return valid end
+        lastError = reason
     end
     error("[n4th] Unduh gagal: " .. tostring(lastError), 0)
 end
 
 local function latestSource()
-    local refUrl = "https://api.github.com/repos/" .. repository .. "/git/ref/heads/main?update=" .. httpService:GenerateGUID(false)
+    local ok, guid = pcall(function() return httpService:GenerateGUID(false) end)
+    local refUrl = "https://api.github.com/repos/" .. repository .. "/git/ref/heads/main?update=" .. tostring(ok and guid or os.time())
     local ref = httpService:JSONDecode(download(refUrl))
     local commit = type(ref) == "table" and type(ref.object) == "table" and ref.object.sha
     if type(commit) ~= "string" or #commit ~= 40 or not commit:match("^%x+$") then
@@ -51,24 +74,36 @@ end
 
 for attempt = 1, 3 do
     local ok, source, commit = pcall(latestSource)
+    if not ok then
+        local primaryError = source
+        ok, source = pcall(download, "https://raw.githubusercontent.com/" .. repository .. "/refs/heads/main/n4th-main.lua")
+        if ok then commit = nil else source = tostring(primaryError) .. "\n" .. tostring(source) end
+    end
     if ok then
-        local fn, compileError = loadstring(source, "n4th-main")
-        if not fn then error("[n4th] Script terbaru gagal dikompilasi: " .. tostring(compileError), 0) end
-        print("[n4th] Menjalankan commit " .. commit:sub(1, 8))
+        local compiled, fn, compileError = pcall(loadstring, source, "n4th-main")
+        if not compiled or type(fn) ~= "function" then compiled, fn, compileError = pcall(loadstring, source) end
+        if not compiled or type(fn) ~= "function" then
+            reportFailure("[n4th] Script terbaru gagal dikompilasi: " .. tostring(compiled and compileError or fn))
+        end
+        print(commit and ("[n4th] Menjalankan commit " .. commit:sub(1, 8)) or "[n4th] Menjalankan cabang main langsung")
         -- Error runtime tidak memicu eksekusi ulang atau aksi game ganda.
         local ran, result = xpcall(fn, function(err)
             if debug and type(debug.traceback) == "function" then return debug.traceback(tostring(err), 2) end
             return tostring(err)
         end)
         if not ran then
-            local globals = (getgenv and getgenv()) or _G
+            local globals = _G
+            if type(getgenv) == "function" then
+                local found, value = pcall(getgenv)
+                if found and type(value) == "table" then globals = value end
+            end
             local session = globals.__n4thOpus
             local step = session and session.InitStep or "inisialisasi script"
-            error("[n4th] Gagal saat " .. tostring(step) .. ":\n" .. tostring(result), 0)
+            reportFailure("[n4th] Gagal saat " .. tostring(step) .. ":\n" .. tostring(result))
         end
         return result
     end
     lastError = tostring(source)
     if attempt < 3 then task.wait(1) end
 end
-error("[n4th] Gagal mengambil update setelah 3 percobaan: " .. lastError, 0)
+reportFailure("[n4th] Gagal mengambil update setelah 3 percobaan: " .. lastError)

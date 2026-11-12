@@ -1,11 +1,15 @@
 
-local G = (getgenv and getgenv()) or _G
+local G = _G
+if type(getgenv) == "function" then
+    local ok, globals = pcall(getgenv)
+    if ok and type(globals) == "table" then G = globals end
+end
 for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = nama versi lama
     if G[key] and G[key].Cleanup then pcall(G[key].Cleanup) end
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-12-dirt-farm-batch-planting-1"
+Session.Build = "2026-11-12-dirt-last-block-compat-1"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -14,9 +18,12 @@ end
 local getgc = getgc or get_gc_objects
 local getmodules = getmodules or get_modules
 local gethui = gethui or get_hidden_gui
+local getconnections = getconnections or get_connections
 function Session.connectionFunction(connection)
     if type(connection) == "function" then return connection end
     local ok, fn = pcall(function() return connection.Function end)
+    if ok and type(fn) == "function" then return fn end
+    ok, fn = pcall(function() return connection.Callback end)
     if ok and type(fn) == "function" then return fn end
     if type(getconnectionfunction) == "function" then
         ok, fn = pcall(getconnectionfunction, connection)
@@ -44,7 +51,8 @@ function Session.download(url)
         lastError = reason
     else lastError = tostring(source) end
     local seen = {}
-    for _, api in ipairs({ request or false, http_request or false, (syn and syn.request) or false, (http and http.request) or false }) do
+    for _, api in ipairs({ request or false, http_request or false, syn_request or false,
+        (syn and syn.request) or false, (http and http.request) or false, (fluxus and fluxus.request) or false }) do
         if type(api) == "function" and not seen[api] then
             seen[api] = true
             local sent, response = pcall(api, { Url = url, Method = "GET" })
@@ -57,8 +65,18 @@ function Session.download(url)
                     if valid then return valid end
                     lastError = reason
                 end
+            elseif sent and type(response) == "string" then
+                local valid, reason = checked(response)
+                if valid then return valid end
+                lastError = reason
             else lastError = tostring(response) end
         end
+    end
+    local fetched, fallback = pcall(function() return game:GetService("HttpService"):GetAsync(url) end)
+    if fetched then
+        local valid, reason = checked(fallback)
+        if valid then return valid end
+        lastError = reason
     end
     error("[n4th] Unduh gagal: " .. tostring(lastError), 0)
 end
@@ -442,6 +460,17 @@ do
         end
         return false
     end
+    local function readExport(object, untilTime)
+        local done, ok, value = false, false, nil
+        local worker = task.spawn(function()
+            ok, value = pcall(require, object)
+            done = true
+        end)
+        while alive() and not done and os.clock() < untilTime do task.wait(0.05) end
+        if done then return ok, value end
+        if task.cancel and worker then pcall(task.cancel, worker) end
+        return false, "batas waktu membaca export"
+    end
     local function scanLoaded()
         exportsComplete = true
         for object in pairs(loaded) do
@@ -449,20 +478,13 @@ do
             if not triedModules[object] and clientModule(object) then
                 triedModules[object] = true
                 Session.InitStep = "membaca export client " .. object:GetFullName()
-                local done, ok, value = false, false, nil
-                local worker = task.spawn(function()
-                    ok, value = pcall(require, object)
-                    done = true
-                end)
-                local untilTime = math.min(moduleDeadline, os.clock() + 1)
-                while alive() and not done and os.clock() < untilTime do task.wait(0.05) end
-                if done and ok then
+                local ok, value = readExport(object, math.min(moduleDeadline, os.clock() + 1))
+                if ok then
                     Session.ModuleScan.Loaded += 1
                     inspectValue(exportMatches, value, object)
                 else
                     Session.ModuleScan.Errors += 1
-                    Session.ModuleScan.LastError = object:GetFullName() .. ": " .. (done and tostring(value):sub(1, 180) or "batas waktu membaca export")
-                    if not done and task.cancel and worker then pcall(task.cancel, worker) end
+                    Session.ModuleScan.LastError = object:GetFullName() .. ": " .. tostring(value):sub(1, 180)
                 end
                 task.wait()
             end
@@ -529,12 +551,17 @@ do
         end
         if object then
             Session.InitStep = "memuat " .. object:GetFullName()
-            local ok, result = pcall(require, object)
+            local ok, result = readExport(object, os.clock() + 4)
             if ok and type(result) == "table" then
                 Session.Modules[name] = object:GetFullName()
                 return true, result, object
             end
             reason = ok and "hasil require bukan tabel" or tostring(result)
+            local recovered, recoveredObject = structuralModule(name, true)
+            if recovered then
+                Session.Modules[name] = recoveredObject and recoveredObject:GetFullName() or "runtime:" .. name
+                return true, recovered, recoveredObject
+            end
         end
         local message = "[n4th] Modul " .. name .. ": " .. (reason or (required and "tidak ditemukan setelah pencarian 30 detik" or "tidak ditemukan"))
         if required then
@@ -593,6 +620,13 @@ do
         "https://github.com/Footagesus/WindUI/releases/download/1.6.66/main.lua",
     }
 
+    -- WindUI sudah membawa ikon bawaan. Hindari unduhan ikon, file opsional, dan akses CoreGui.
+    local prelude = [[
+local __n4thGui = ...
+local writefile, cloneref, clonereference
+local function gethui() return __n4thGui end
+local function protectgui() end
+]]
     local function downloadWindUI()
         local lastError = "respons kosong"
         for attempt = 1, 2 do
@@ -605,7 +639,10 @@ do
                 elseif source:match("^%s*<") then
                     lastError = "server mengirim HTML, bukan Lua (mungkin 504 Gateway Time-out)"
                 else
-                    local compiled, fn, compileError = pcall(loadstring, source, "WindUI")
+                    local compiled, fn, compileError = pcall(loadstring, prelude .. source, "WindUI")
+                    if not compiled or type(fn) ~= "function" then
+                        compiled, fn, compileError = pcall(loadstring, prelude .. source)
+                    end
                     if compiled and type(fn) == "function" then return fn end
                     lastError = tostring(compiled and compileError or fn)
                 end
@@ -617,7 +654,11 @@ do
     end
 
     -- Inisialisasi hanya sekali, setelah respons berhasil dikompilasi.
-    WindUI = downloadWindUI()()
+    WindUI = downloadWindUI()(PlayerGui)
+    pcall(function()
+        WindUI.ScreenGui.DisplayOrder = 900
+        WindUI.ScreenGui.ResetOnSpawn = false
+    end)
 end
 Session.InitStep = "config dan referensi game"
 
@@ -2987,7 +3028,7 @@ function Drops.dirtRoom(id)
     if dirt and (id == dirt.block or id == dirt.seed) then return math.max(0, 200 - invCount(id)) end
 end
 
-local function takeDrop(d)
+local function takeDrop(d, lastDirtBlock)
     if AutoDrop.Busy or AutoDrop.isProtected(d) then return false end
     local worldTake = Refs.World and rawget(Refs.World, "takeDrop")
     if type(worldTake) ~= "function" and not TakeDropRemote then return false end
@@ -2998,9 +3039,9 @@ local function takeDrop(d)
     if DropFailUntil[d.uid] and now < DropFailUntil[d.uid] then return false end
 
     local roomForDirt = Drops.dirtRoom(d.id)
-    if roomForDirt == 0 then return false end
+    if roomForDirt == 0 or (lastDirtBlock and roomForDirt ~= 1) then return false end
     local amount = roomForDirt and math.min(d.n, roomForDirt) or d.n
-    if d.id ~= 112 and Refs.Inv then -- 112 = gems, tidak makan slot
+    if d.id ~= 112 and Refs.Inv and not (lastDirtBlock and roomForDirt == 1) then -- 112 = gems
         local okr, room = pcall(function() return Refs.Inv:room(d.id) end)
         if okr and type(room) == "number" then amount = math.min(amount, room) end
     end
@@ -3382,7 +3423,11 @@ end
 
 if MenuModOk and type(MenuModule) == "table" and type(rawget(MenuModule, "isDown")) == "function" then
     OrigIsDown = rawget(MenuModule, "isDown")
-    MenuModule.isDown = isDownWrapper
+    local ok, reason = pcall(function() MenuModule.isDown = isDownWrapper end)
+    if not ok then
+        OrigIsDown = nil
+        warn("[n4th] Kontrol gerak tidak bisa dihubungkan: " .. tostring(reason))
+    end
 end
 
 -- Pasang walkspeed & fly tiap frame (game bisa menimpanya)
@@ -4841,6 +4886,30 @@ end
 --   satu-satu, dan yang tetap tidak terambil tidak dicoba lagi sebentar.
 -- filter(d) = true: drop ini boleh diambil (nil = semua). maxSec = batas waktu (20 dtk).
 Move.FetchFail = {}
+function Drops.topUpDirt(live)
+    local dirt = Build.DirtRun
+    if not dirt or Build.DirtRefill ~= dirt or Drops.dirtRoom(dirt.block) ~= 1 or not live() then return false end
+    local now = os.clock()
+    if now < (dirt.nextTopUp or 0) then return false end
+    dirt.nextTopUp = now + 0.4
+    local s = playerState()
+    if not s or s.dead then return false end
+    local cx, cy = s.x, s.y - 0.475
+    local best, bestDistance
+    for _, d in ipairs(Drops.list or {}) do
+        if type(d) == "table" and d.id == dirt.block and type(d.y) == "number" and canTry(d, now)
+            and not d.pending and not d.display then
+            local dx, dy = abs(d.x - cx), abs(d.y - cy)
+            local distance = dx + dy
+            if dx < 0.6 and dy < 0.75 and (not bestDistance or distance < bestDistance)
+                and not solidAt(floor(d.x), floor(d.y)) then
+                best, bestDistance = d, distance
+            end
+        end
+    end
+    return best ~= nil and live() and takeDrop(best, true)
+end
+
 function Move.fetchDrops(live, maxDist, filter, maxSec)
     local list = Drops.list
     local w = Refs.World
@@ -4861,7 +4930,9 @@ function Move.fetchDrops(live, maxDist, filter, maxSec)
         if filter and not filter(d) then return false end
         if d.id ~= 112 and Refs.Inv then -- inventori penuh: tidak usah diambil
             local okr, r = pcall(function() return Refs.Inv:room(d.id) end)
-            if okr and type(r) == "number" and r <= 0 then return false end
+            local dirt = Build.DirtRun
+            local lastDirt = dirt and Build.DirtRefill == dirt and d.id == dirt.block and Drops.dirtRoom(d.id) == 1
+            if okr and type(r) == "number" and r <= 0 and not lastDirt then return false end
         end
         return true
     end
@@ -9454,6 +9525,15 @@ local function buildLoop(runId, dirt)
                     end
                     Build.Phase = ("Produksi %s: block %d / %d"):format(PHASE_NAME[o.phase or "panen"] or "-", have, target)
                         .. (o.rowK and (" | baris y " .. P.rows[o.rowK]) or "")
+                    if dirt and have == target - 1 then
+                        if Drops.topUpDirt(live) then continue end
+                        if os.clock() >= (o.nextLastDirtSweep or 0) then
+                            Build.sweep(P, live, { [block] = true }, 6)
+                            if not live() then break end
+                            o.nextLastDirtSweep = os.clock() + 4
+                            if invCount(block) >= target or Drops.topUpDirt(live) then continue end
+                        end
+                    end
                     local pr, nextReady, nReady = Build.produceStep(o)
                     if not live() then break end
                     local noSeeds = not nextReady and (nReady or 0) == 0 and invCount(seed) <= 0
