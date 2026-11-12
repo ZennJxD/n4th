@@ -9,7 +9,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = nama versi l
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-12-world-reconnect-1"
+Session.Build = "2026-11-12-dropdown-layer-1"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -789,6 +789,11 @@ local function protectgui() end
     pcall(function()
         WindUI.ScreenGui.DisplayOrder = 900
         WindUI.ScreenGui.ResetOnSpawn = false
+    end)
+    pcall(function()
+        -- WindUI menempatkan semua daftar pilihan di ScreenGui terpisah.
+        WindUI.DropdownGui.DisplayOrder = WindUI.ScreenGui.DisplayOrder + 1
+        WindUI.DropdownGui.ResetOnSpawn = false
     end)
 end
 Session.InitStep = "config dan referensi game"
