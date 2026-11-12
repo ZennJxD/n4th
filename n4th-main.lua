@@ -5,7 +5,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = nama versi l
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-12-nickname-dsc-1"
+Session.Build = "2026-11-12-dirt-farm-refill-1"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -976,6 +976,10 @@ local I18N = { Lang = "id", Saved = "id", Ask = false, Chosen = false }
 do (function() -- fungsi sendiri: variabel di dalam tidak ikut batas 200 local
 
 I18N.EN = {
+    ["Isi ulang Dirt dari drop atau Dirt Seed, lalu lanjut pasang."] = "Refill Dirt from drops or Dirt Seeds, then resume building.",
+    ["Ambil Dirt dan Dirt Seed di lahan"] = "Collecting Dirt and Dirt Seeds in the farm",
+    ["Data pohon belum terbaca. Hubungkan ulang ke game untuk isi ulang Dirt."] =
+        "Tree data is unavailable. Reconnect to the game to refill Dirt.",
     ["Gali dulu"] = "Dig first",
     ["Nyalakan untuk menggali farm baru. Matikan untuk lanjut pasang di farm yang sudah digali."] =
         "Turn on to excavate a new farm. Leave off to resume placing blocks in an excavated farm.",
@@ -1426,6 +1430,7 @@ I18N.EN = {
 
 -- Frasa untuk teks yang berubah-ubah (status, notifikasi, pesan Discord)
 I18N.PH = {
+    { "Dirt dan Dirt Seed habis. Sisa", "Out of Dirt and Dirt Seeds. Remaining" },
     { "Baris pasang", "Placement rows" },
     { "Dirt habis, masih kurang", "Out of Dirt, still short" },
     { "Pasang Dirt dari bawah", "Placing Dirt from the bottom" },
@@ -5787,13 +5792,17 @@ local function fcHarvestOk(x, y)
 end
 
 local function fcPlantOk(idx)
+    if FC.plantArea then
+        local w = Refs.World
+        if not w or not FC.plantArea(idx % w.w, idx // w.w) then return false end
+    end
     return (not FC.plantSet or FC.plantSet[idx]) and not (FC.exclude and FC.exclude[idx])
 end
 
 local function plantSeed(x, y)
     local id = FC.seed
     if not id or invCount(id) <= 0 then return false end
-    sendSetTile("fg", x, y, id)
+    if not sendSetTile("fg", x, y, id) then return false end
     if Refs.Inv then pcall(function() Refs.Inv:remove(id, 1) end) end
     FC.onPlant()
     FC.status("Tanam " .. itemName(id) .. " (" .. x .. "," .. y .. ")")
@@ -5804,7 +5813,7 @@ end
 local function farmerWorkInReach(s)
     local w = Refs.World
     local W = w.w
-    local R = farmReach() - 0.08
+    local R = FC.plant and FC.placeReach or farmReach() - 0.08
     local cx, cy = s.x, s.y - 0.475
     local now = os.clock()
     local st = workspace:GetServerTimeNow()
@@ -5847,7 +5856,7 @@ local function farmerWorkInReach(s)
         local cur = playerState()
         if not cur or not stateReaches(cur, t.x, t.y, R) then break end
         local id = fgIdAt(t.x, t.y)
-        local r = tryBreak(t.x, t.y, false) -- pohon siap: 1 pukulan = panen
+        local r = tryBreak(t.x, t.y, false, nil, FC.allowHarvest) -- pohon siap: 1 pukulan = panen
         if r == "broke" then
             FC.onHarvest(id)
             got += 1
@@ -6037,7 +6046,7 @@ local function fieldStep()
     Move.AirAt = nil
     releaseInput()
     if farmerWorkInReach(s) > 0 then return "work" end
-    local R = farmReach() - 0.35
+    local R = FC.plant and FC.placeReach or farmReach() - 0.35
     local useBlock = scaffoldId() ~= nil
     local sx, sy = startNode(s)
     local px, py = floor(s.x), floor(s.y - 0.475)
@@ -8883,6 +8892,9 @@ function Build.cfg(o, harvest, plant)
         plant = plant and invCount(o.seed) > 0,
         seed = o.seed,
         only = o.seed,           -- hanya panen pohon seed block ini
+        allowHarvest = o.allowHarvest,
+        placeReach = o.plan and o.plan.placeOnly and Build.placeReach() or nil,
+        plantArea = o.plan and o.plan.placeOnly and o.area or nil,
         skip = Build.FieldSkip,
         hms = Farmer.HarvestMs,
         pms = Farmer.PlantMs,
@@ -9119,7 +9131,8 @@ function Build.produceStep(o)
             local r = fieldStep()
             if r ~= "idle" then return r end
         end
-        if not o.broke and Build.freeSpots(o) > 0 and invCount(o.seed) <= 0 and invCount(o.block) > 0 then
+        if not (o.plan and o.plan.placeOnly) and not o.broke and Build.freeSpots(o) > 0
+            and invCount(o.seed) <= 0 and invCount(o.block) > 0 then
             o.phase = "break"
         else
             o.phase, o.broke = "tunggu", nil
@@ -9319,23 +9332,31 @@ local function buildLoop(runId, dirt)
                 elseif pr ~= "none" then
                     noneAt = nil
                 end
-            elseif P.placeOnly then
-                Build.Phase = "Ambil Dirt sisa di lahan"
-                Build.sweep(P, live, { [block] = true }, 90)
-                if not live() then break end
-                if invCount(block) > 0 then
-                    o.placeNeed = nil
-                    continue
-                end
-                Build.stop(("Dirt habis, masih kurang %d tile lantai"):format(info.need))
-                break
-            elseif not seed then
+            elseif not seed and not P.placeOnly then
                 Build.stop(("Block habis, masih kurang %d (seed-nya tidak ketemu)"):format(info.need))
                 break
             else
                 -- 3) PRODUKSI
                 if phase ~= "produksi" then
-                    if os.clock() - (o.sweptAt or -1e9) > 120 then
+                    if P.placeOnly then
+                        Build.Phase = "Ambil Dirt dan Dirt Seed di lahan"
+                        local materials = { [block] = true }
+                        if seed then materials[seed] = true end
+                        Build.sweep(P, live, materials, 90)
+                        if not live() then break end
+                        if invCount(block) > 0 then
+                            o.placeNeed = nil
+                            continue
+                        end
+                        if not seed then
+                            Build.stop(("Dirt habis, masih kurang %d tile lantai"):format(info.need))
+                            break
+                        end
+                        if not Refs.Trees then
+                            Build.stop("Data pohon belum terbaca. Hubungkan ulang ke game untuk isi ulang Dirt.")
+                            break
+                        end
+                    elseif os.clock() - (o.sweptAt or -1e9) > 120 then
                         -- ambil dulu drop yang tertinggal di lahan (block, seed & lainnya), per baris
                         o.sweptAt = os.clock()
                         Build.Phase = "Ambil drop sisa di lahan (per baris)"
@@ -9348,20 +9369,38 @@ local function buildLoop(runId, dirt)
                     o.phase, o.rowK = nil, nil
                     notify(dirt and "Auto Dirt Farm" or "Bangun Lahan", "Block habis, produksi 1 baris dulu", 4)
                 end
-                local target = math.min(CAP, info.need + Build.RESERVE)
+                local target = P.placeOnly and 1 or math.min(CAP, info.need + Build.RESERVE)
                 if have >= target then
                     phase = "pasang"
-                    notify("Bangun Lahan", "Block cukup (" .. have .. "), lanjut pasang", 4)
+                    notify(dirt and "Auto Dirt Farm" or "Bangun Lahan", "Block cukup (" .. have .. "), lanjut pasang", 4)
                 else
+                    if P.placeOnly and raymanOn() then
+                        Build.stop("Lepas Rayman sebelum menjalankan Auto Dirt Farm")
+                        break
+                    end
                     if o.rowK and not P.rows[o.rowK] then o.rowK = nil end
                     if o.rowK == nil then
-                        o.rowK = Build.prodRow(P) or false
+                        o.rowK = not P.placeOnly and Build.prodRow(P) or false
                         table.clear(Build.Row)
                         if o.rowK then
                             local sp = Build.prodSpots(P, o.rowK)
                             o.plantSet, o.stand, o.tile, o.exclude = sp.set, sp.stand, sp.tile, nil
                         else -- belum ada baris lengkap: tanam di mana saja di luar tile lahan
                             o.plantSet, o.stand, o.tile, o.exclude = nil, nil, nil, landBlockSet(P)
+                            if P.placeOnly then
+                                -- Seed hanya di atas pijakan yang ada, di luar lantai dan akses tangga.
+                                for k, y in ipairs(P.rows) do
+                                    for _, x in ipairs(P.holes[k]) do
+                                        o.exclude[y * P.W + x] = true
+                                        o.exclude[(y - 1) * P.W + x] = true
+                                    end
+                                end
+                                o.allowHarvest = function(x, y, id, layer)
+                                    return live() and layer == "fg" and id == seed and fgIdAt(x, y) == seed
+                                        and not raymanOn() and canWorkAt(x, y)
+                                        and (treeReadyAt(x, y, seed) or math.huge) <= workspace:GetServerTimeNow()
+                                end
+                            end
                         end
                     end
                     Build.Phase = ("Produksi %s: block %d / %d"):format(PHASE_NAME[o.phase or "panen"] or "-", have, target)
@@ -9382,7 +9421,8 @@ local function buildLoop(runId, dirt)
                     if pr ~= "idle" then o.stuckAt = nil end
                     if pr == "idle" then
                         if not nextReady and (nReady or 0) == 0 and invCount(seed) <= 0 and have <= 0 then
-                            Build.stop("Seed & block habis. Butuh " .. info.need .. " block")
+                            Build.stop(P.placeOnly and ("Dirt dan Dirt Seed habis. Sisa %d tile lantai"):format(info.need)
+                                or ("Seed & block habis. Butuh " .. info.need .. " block"))
                             break
                         end
                         if (nReady or 0) > 0 then
@@ -12733,7 +12773,7 @@ do
     safe(function()
         UI.DirtToggle = tab:Toggle({
             Title = "Jalankan Auto Dirt Farm",
-            Desc = "Isi baris Dirt di atas permukaan tanah. Celah untuk tanaman dibuat selang satu tile.",
+            Desc = "Isi ulang Dirt dari drop atau Dirt Seed, lalu lanjut pasang.",
             Value = false,
             Callback = function(on)
                 if on then Build.start(true) elseif Build.DirtRun then Build.stop() end
