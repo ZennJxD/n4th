@@ -5,7 +5,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = nama versi l
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-12-dirt-farm-sky-rows-1"
+Session.Build = "2026-11-12-nickname-dsc-1"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -669,7 +669,7 @@ local Misc = {
     UpHeld = false,   -- tombol ▲ di layar ditahan
     DownHeld = false, -- tombol ▼ di layar ditahan
     CustomName = true,          -- watermark nama (selalu aktif, mati hanya saat script ditutup)
-    NameText = "n4th",  -- teks watermark
+    NameText = "https://dsc.gg/nath",  -- teks watermark
 }
 
 -- Auto Clear World
@@ -9756,6 +9756,10 @@ local function makeLabel(holder, size, isTag)
         lb.AnchorPoint = Vector2.new(0, 0.5)
         lb.Position = UDim2.new(0, 3, 0.5, 0)
         lb.TextXAlignment = Enum.TextXAlignment.Left
+        lb.TextScaled = true
+        local sizeLimit = Instance.new("UITextSizeConstraint")
+        sizeLimit.MaxTextSize = size
+        sizeLimit.Parent = lb
     end
     local st = Instance.new("UIStroke")
     st.Thickness = 2
