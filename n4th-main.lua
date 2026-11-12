@@ -5,7 +5,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = nama versi l
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-12-dirt-farm-refill-200-1"
+Session.Build = "2026-11-12-shorter-routes-1"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -3914,18 +3914,18 @@ end
 --   stair  : tangga lahan: lompat naik 2 lewat lubang ke lorong setinggi 1 tile
 --   pillar : lompat lalu taruh block di bawah kaki (naik 1)
 local MAX_EXPAND = 8000
-local BLOCK_COST = 2
+local BLOCK_COST = 4
 
 local function reachOffsets(R)
     return floor(R), math.ceil(-R + 0.025), floor(R + 0.025)
 end
 
-local function astar(sx, sy, goals, gx, gy, R, useBlock, route)
+local function astar(sx, sy, goals, _gx, _gy, R, useBlock, route)
     local w = Refs.World
     if not w then return nil, false, {} end
     local W, H = w.w, w.h
-    local edgeFailures = route and route.badEdges or BadEdge
-    local canContinue = route and route.live or autoOn
+    local edgeFailures = goals.badEdges or (route and route.badEdges) or BadEdge
+    local canContinue = goals.live or (route and route.live) or autoOn
     local grid, worldName = w.fg, w.name
     local WH = W * H
     local dxm, dyLo, dyHi = reachOffsets(R)
@@ -3965,12 +3965,20 @@ local function astar(sx, sy, goals, gx, gy, R, useBlock, route)
         return v
     end
 
+    local minX, maxX, minY, maxY = W, -1, H, -1
+    for index, wanted in pairs(goals) do
+        if type(index) == "number" and wanted then
+            local x, y = index % W, index // W
+            minX, maxX = math.min(minX, x - dxm), math.max(maxX, x + dxm)
+            minY, maxY = math.min(minY, y - dyHi), math.max(maxY, y - dyLo)
+        end
+    end
+    if maxX < minX then return nil, false, {} end
     local function h(x, y)
-        local dx = abs(gx - x) - R
-        local dyRaw = gy - y
-        local dy = abs(dyRaw) - R
-        local vw = (dyRaw < 0) and 1.5 or 0.5
-        return (dx > 0 and dx or 0) + vw * (dy > 0 and dy or 0)
+        local dx = math.max(minX - x, x - maxX, 0)
+        local dy = math.max(0.5 * (minY - y), 1.5 * (y - maxY), 0)
+        -- Satu lompatan / jatuhan bisa menempuh kedua sumbu sekaligus.
+        return math.max(dx, dy)
     end
 
     local function isGoal(nx, ny)
@@ -4013,7 +4021,7 @@ local function astar(sx, sy, goals, gx, gy, R, useBlock, route)
         for dy = 1, 3 do
             if not open(x, y - dy) then break end
             if sup(x, y - dy) and open(x, y - dy - 1) then
-                add(x, y - dy, "jump", 1 + 1.5 * dy, false)
+                add(x, y - dy, "jump", 2 + 1.5 * dy, false)
             end
         end
         for s = -1, 1, 2 do
@@ -4031,7 +4039,7 @@ local function astar(sx, sy, goals, gx, gy, R, useBlock, route)
                         fy += 1
                     end
                     if fy < H and open(ax, fy) and sup(ax, fy) then
-                        add(ax, fy, "fall", 1 + 0.5 * (fy - y), false)
+                        add(ax, fy, "fall", 1.5 + 0.5 * (fy - y), false)
                     end
                     -- lompati lubang 1-2 tile
                     if open(x, y - 1) and open(x, y - 2) then
@@ -4044,7 +4052,7 @@ local function astar(sx, sy, goals, gx, gy, R, useBlock, route)
                                 for k = 0, 2 do
                                     if not open(bx, y + k) then break end
                                     if sup(bx, y + k) then
-                                        add(bx, y + k, "gap", dist + 0.5 + 0.5 * k, false)
+                                        add(bx, y + k, "gap", dist + 1 + 0.5 * k, false)
                                         break
                                     end
                                 end
@@ -4057,7 +4065,7 @@ local function astar(sx, sy, goals, gx, gy, R, useBlock, route)
             for dy = 1, 3 do
                 if not open(x, y - dy) then break end
                 if open(x, y - dy - 1) and open(ax, y - dy) and sup(ax, y - dy) and open(ax, y - dy - 1) then
-                    add(ax, y - dy, "jump", 1 + 1.5 * dy, false)
+                    add(ax, y - dy, "jump", 2 + 1.5 * dy, false)
                 end
             end
             -- tangga lahan: naik 1-2 tile ke lorong setinggi 1 tile (atapnya pas di atas kepala,
@@ -4100,7 +4108,7 @@ local function astar(sx, sy, goals, gx, gy, R, useBlock, route)
     local bestGoal, bestCount, bestCost, costLimit = nil, 0, math.huge, nil
 
     while hn > 0 do
-        if costLimit and hf[1] > costLimit + (goals.batchExtra or 6) then break end
+        if costLimit and hf[1] > costLimit then break end
         popped += 1
         -- Biaya satu titik berbeda-beda (collision, lock, dan lompatan).
         -- Batasi waktu CPU, bukan menunggu 400 titik selesai sekaligus.
@@ -4120,7 +4128,7 @@ local function astar(sx, sy, goals, gx, gy, R, useBlock, route)
                 if count > bestCount or (count == bestCount and g[cur] < bestCost) then
                     bestGoal, bestCount, bestCost = cur, count, g[cur]
                 end
-                costLimit = costLimit or (g[cur] + (goals.batchExtra or 6))
+                costLimit = costLimit or (g[cur] + (goals.batchExtra or 2))
             end
             expanded += 1
             if expanded > MAX_EXPAND then return bestGoal and makePath(bestGoal) or nil, false, closed end
@@ -4551,7 +4559,7 @@ local function followPath(path, badEdges)
             if badEdges and Move.HomingRoute and Move.HomingRoute.invalidated then return false end
             -- hindari jalur ini sementara (tangga cuma sebentar, supaya tidak memutar jauh ke tangga lain)
             local failures = badEdges or BadEdge
-            if badEdges and last > i then
+            if last > i then
                 local state = playerState()
                 if state then
                     local x, y = startNode(state)
@@ -4575,7 +4583,7 @@ local function travelGroup(sx, sy, group, R, useBlock, skipTbl, failTbl)
     goals.maxY = group.maxY
     goals.los = group.los
     if group.preferBatch then
-        goals.preferBatch, goals.targetCount, goals.batchExtra = true, #group, math.max(2, 2 * floor(R))
+        goals.preferBatch, goals.targetCount = true, #group
     end
     for _, t in ipairs(group) do goals[t.idx] = true end
     local first = group[1]
@@ -4814,26 +4822,17 @@ end
 -- drop di jalan terambil sambil lewat, sama seperti main manual.
 function Move.walkRow(ry, xa, xb)
     local w = Refs.World
-    if not w then return false end
-    for _, tx in ipairs({ xa, xb }) do
-        local s = playerState()
-        if not s or s.dead then return false end
-        local sx, sy = startNode(s)
-        if not (sx == tx and sy == ry) then
-            local goal = { [ry * w.w + tx] = true }
-            local path = astar(sx, sy, goal, tx, ry, 0.5, false) or astar(sx, sy, goal, tx, ry, 1.2, false)
-            if not path then
-                releaseInput()
-                return false
-            end
-            if #path > 0 and not followPath(path) then
-                releaseInput()
-                return false
-            end
-        end
-    end
+    local s = playerState()
+    if not w or not s or s.dead then return false end
+    local sx, sy = startNode(s)
+    local base = ry * w.w
+    local path = astar(sx, sy, { [base + xa] = true, [base + xb] = true }, xa, ry, 0.5, false)
+    if not path then return false end
+    local first = path[#path] and path[#path].x or sx
+    local last = first == xa and xb or xa
+    local ok = (#path == 0 or followPath(path)) and (last == first or execWalk(last, ry))
     releaseInput()
-    return true
+    return ok
 end
 
 -- Ambil drop yang belum terambil, PER BARIS (seperti main manual):
@@ -4849,7 +4848,7 @@ function Move.fetchDrops(live, maxDist, filter, maxSec)
     maxDist = maxDist or 8
     local got, t0 = 0, os.clock()
     local function want(d, now)
-        if not (canTry(d, now) and d.id) then return false end
+        if not (canTry(d, now) and d.id and type(d.y) == "number") then return false end
         if Move.FetchFail[d.uid] and now < Move.FetchFail[d.uid] then return false end
         if solidAt(floor(d.x), floor(d.y)) then -- terkubur di dalam block: tidak bisa disentuh
             Move.FetchFail[d.uid] = now + 300
@@ -4890,19 +4889,26 @@ function Move.fetchDrops(live, maxDist, filter, maxSec)
         if best.x < 0 or ry < 0 or best.x >= w.w or ry >= w.h then
             Move.FetchFail[best.uid] = now + 30
         else
-            -- semua drop di baris itu: susuri dari ujung terdekat ke ujung lainnya
+            -- Sapu satu bentang yang bisa dilalui sambil jalan. Lubang/tangga memisahkan bentang.
+            local left, right = floor(best.x), floor(best.x)
+            local grounded = realSupport(left, ry) and openAt(left, ry)
+            if grounded then
+                while left > 0 and left >= cx - maxDist and openAt(left - 1, ry) and realSupport(left - 1, ry) do left -= 1 end
+                while right < w.w - 1 and right <= cx + maxDist and openAt(right + 1, ry) and realSupport(right + 1, ry) do right += 1 end
+            end
             local inRow, lo, hi = {}, best.x, best.x
             for _, d in ipairs(list) do
-                if floor(d.y) == ry and abs(d.x - cx) <= maxDist and want(d, now) then
+                if type(d) == "table" and type(d.x) == "number" and type(d.y) == "number"
+                    and floor(d.y) == ry and d.x >= left and d.x < right + 1
+                    and abs(d.x - cx) <= maxDist and want(d, now) then
                     inRow[#inRow + 1] = d
                     if d.x < lo then lo = d.x end
                     if d.x > hi then hi = d.x end
                 end
             end
             local xa, xb = floor(lo), floor(hi)
-            if abs(hi - cx) < abs(lo - cx) then xa, xb = xb, xa end
-            setMoveStatus(("Ambil drop baris y %d (x %d-%d)"):format(ry, math.min(xa, xb), math.max(xa, xb)))
-            local ok = Move.walkRow(ry, xa, xb)
+            setMoveStatus(("Ambil drop baris y %d (x %d-%d)"):format(ry, xa, xb))
+            local ok = grounded and Move.walkRow(ry, xa, xb)
             -- pungutan dikirim ke server: tunggu balasannya (ping) sebelum menilai drop tertinggal
             local ping = 0.1
             pcall(function() ping = LocalPlayer:GetNetworkPing() end)
@@ -4920,9 +4926,8 @@ function Move.fetchDrops(live, maxDist, filter, maxSec)
             got += 1
             Move.FetchTry = Move.FetchTry or {}
             for _, d in ipairs(inRow) do
-                if table.find(list, d) and want(d, os.clock()) then
-                    local okv, why = false, "nopath"
-                    if ok then okv, why = Move.visitDrop(d) end
+                if (ok or d == best) and table.find(list, d) and want(d, os.clock()) then
+                    local okv, why = Move.visitDrop(d)
                     if not okv then
                         local tries = (Move.FetchTry[d.uid] or 0) + 1
                         Move.FetchTry[d.uid] = tries
@@ -6414,14 +6419,14 @@ local function walkTo(tx, ty, maxSec, live, makeRoute)
     Move.Homing = true
     Move.HomingLive = live
     autoBegin()
-    local goal = { [ty * w.w + tx] = true }
+    local badEdges = {}
+    local goal = { [ty * w.w + tx] = true, badEdges = badEdges, live = live }
     local t0, ok = os.clock(), false
-    local badEdges = makeRoute and {}
     local misses = 0
     while alive() and Move.Homing and (not live or live()) and Refs.World == w and w.fg == grid
         and os.clock() - t0 < (maxSec or 30) do
         local s = playerState()
-        if not s or s.dead or (makeRoute and not s.grounded) then
+        if not s or s.dead or not s.grounded then
             task.wait(0.15)
             continue
         end
@@ -6448,7 +6453,7 @@ local function walkTo(tx, ty, maxSec, live, makeRoute)
         local path
         if not route or route.point(tx, ty) then path = astar(sx, sy, goal, tx, ty, 0.5, false, route) end
         if not path or (route and #path == 0) then
-            if not route then break end
+            if not route and not next(badEdges) then break end
             misses += 1
             if misses >= 3 then break end
             -- Coba lagi setelah posisi / daftar drop berubah, tanpa riwayat gagal dari farming.
@@ -8552,7 +8557,7 @@ function Build.goNear(targets, R, maxY, noSelf, live)
     local s = playerState()
     if not w or not s then return "wait" end
     local sx, sy = startNode(s)
-    local goals = { maxY = maxY, noSelf = noSelf }
+    local goals = { maxY = maxY, noSelf = noSelf, live = live }
     if Build.DirtRun then goals.startState = s end
     for _, t in ipairs(targets) do goals[t.idx] = true end
     local f = targets[1]
@@ -8689,10 +8694,22 @@ function Build.carveStep(P, list, live)
         end
     end
     if not fi then return "none" end
+    local work = list
+    local first = list[fi]
+    if P.dirt and first.kind == "gap" then
+        work = {}
+        for _, t in ipairs(list) do
+            if t.kind == "gap" and t.y == first.y and not skipped(Build.Skip, t.idx, now) then
+                work[#work + 1] = t
+            end
+        end
+        table.sort(work, function(a, b) return abs(a.x + 0.5 - s.x) < abs(b.x + 0.5 - s.x) end)
+        fi = 1
+    end
     -- pecah yang terjangkau dari sini sesuai urutan (berhenti di tile pertama yang tidak terjangkau)
     local did = 0
-    for j = fi, math.min(#list, fi + 5) do
-        local t = list[j]
+    for j = fi, math.min(#work, fi + 5) do
+        local t = work[j]
         if not skipped(Build.Skip, t.idx, now) then
             local cur = playerState()
             local R = (t.kind == "fill" and fgIdAt(t.x, t.y) == 0) and placeR or hitR
@@ -8719,10 +8736,10 @@ function Build.carveStep(P, list, live)
         end
     end
     if did > 0 then return "work" end
-    local F = list[fi]
+    local F = work[fi]
     local filling = F.kind == "fill"
     local R = (filling and fgIdAt(F.x, F.y) == 0) and placeR or hitR
-    local r = Build.goNear({ F }, R, nil, filling, live)
+    local r = Build.goNear(work ~= list and work or { F }, R, nil, filling, live)
     if r == "nopath" then
         -- belum ada jalan ke sini: lewati sebaris dulu (tidak cari jalan berulang per tile)
         if filling then
@@ -8824,7 +8841,7 @@ function Build.placeStep(P, live)
         if not cur or not cur.grounded then break end
         local occupied = fgIdAt(t.x, t.y) ~= 0
         local R = occupied and hitR or placeR
-        if stateReaches(cur, t.x, t.y, R) and (onRow or under or entry[t.x]) then
+        if stateReaches(cur, t.x, t.y, R) and (P.dirt or onRow or under or entry[t.x]) then
             if occupied then
                 if P.placeOnly then
                     skipTile(Build.Skip, t.idx, 30)
@@ -8866,14 +8883,14 @@ function Build.placeStep(P, live)
 
     local RR = P.dirt and placeR or placeR - 0.27
     -- naik ke baris ini lalu pasang ke depan (baris jadi jembatan)
-    if hasAny and not under then
+    if not P.dirt and hasAny and not under then
         local r = Build.goNear(T, RR, y - 1, true, live)
         if r ~= "nopath" then return r end
         Build.Under[k] = now + 60 -- tidak bisa naik ke baris ini: sementara pasang dari bawah
         under = true
     end
     -- belum ada pijakan: ke ujung tangga, pasang block pertama baris dari sana
-    if not under then
+    if not P.dirt and not under then
         local E = {}
         for _, t in ipairs(T) do
             if entry[t.x] then E[#E + 1] = t end
