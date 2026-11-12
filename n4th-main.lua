@@ -9,7 +9,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = nama versi l
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-12-register-budget-1"
+Session.Build = "2026-11-12-movement-reconnect-1"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -227,6 +227,14 @@ do
         end
         return entries >= 12 and named / entries >= 0.85 and metadata >= 8 and (seeds > 0 or solids >= 4)
     end
+    function Session.isMovementMenu(value)
+        if type(value) ~= "table" or type(rawget(value, "isDown")) ~= "function" then return false end
+        local keys = rawget(value, "KEYS") or rawget(value, "keys")
+        if type(keys) == "table" and next(keys) ~= nil then return true end
+        return (type(rawget(value, "mount")) == "function" and type(rawget(value, "SKINS")) == "table"
+                and type(rawget(value, "DEFAULT_SKIN")) == "number")
+            or (rawget(value, "KEYS") == keys and type(keys) == "table")
+    end
     local function matches(name, value)
         if type(value) ~= "table" then return false end
         if name == "ItemDB" then return isItemDatabase(value) end
@@ -238,10 +246,7 @@ do
                 and type(rawget(value, "EVENTS")) == "table" and type(rawget(value, "punch")) == "table"
                 and type(rawget(rawget(value, "punch"), "send")) == "function"
         end
-        if name == "WorldMenu" then
-            return functions(value, { "mount", "isDown" }) and type(rawget(value, "SKINS")) == "table"
-                and type(rawget(value, "KEYS")) == "table" and type(rawget(value, "DEFAULT_SKIN")) == "number"
-        end
+        if name == "WorldMenu" then return Session.isMovementMenu(value) end
         if name == "Roles" then return functions(value, { "isDeveloper", "isModerator", "isUndercover" }) end
         if name == "Sfx" then return functions(value, { "play", "playAt", "loop" }) end
         return false
@@ -464,7 +469,7 @@ do
         local filters = {
             ItemDB = { 2, 4 }, Inventory = { "new", "add", "remove", "count", "used", "room", "select" },
             Net = { "call", "on", "worldTag", "CALLS", "EVENTS", "punch" },
-            WorldMenu = { "mount", "isDown", "SKINS", "KEYS", "DEFAULT_SKIN" },
+            WorldMenu = { "isDown", "KEYS" },
             Roles = { "isDeveloper", "isModerator", "isUndercover" }, Sfx = { "play", "playAt", "loop" },
         }
         for _, name in ipairs(structuralNames) do
@@ -625,11 +630,12 @@ do
         if object then
             Session.InitStep = "memuat " .. object:GetFullName()
             local ok, result = readExport(object, os.clock() + 4)
-            if ok and type(result) == "table" then
+            if ok and type(result) == "table"
+                and (name ~= "WorldMenu" or type(rawget(result, "isDown")) == "function") then
                 Session.Modules[name] = object:GetFullName()
                 return true, result, object
             end
-            reason = ok and "hasil require bukan tabel" or tostring(result)
+            reason = ok and "export modul tidak cocok" or tostring(result)
             local recovered, recoveredObject = structuralModule(name, true)
             if recovered then
                 Session.Modules[name] = recoveredObject and recoveredObject:GetFullName() or "runtime:" .. name
@@ -667,9 +673,32 @@ do
     if not GameGui and menuObject then GameGui = menuObject.Parent end
     RolesOk, RolesModule = loadModule(Shared, "Roles", false)
     SfxOk, SfxModule = loadModule(Shared, "Sfx", false)
+    function Session.resolveMovement()
+        if Session.MovementScan or Session.ItemScan or not alive() then return nil end
+        if os.clock() - (Session.MovementScanAt or -math.huge) < 3 then return nil end
+        Session.MovementScanAt, Session.MovementScan = os.clock(), true
+        local ok, value = pcall(function()
+            GameGui = PlayerGui:FindFirstChild("GameGui") or GameGui
+            refreshIndex()
+            moduleDeadline = os.clock() + 3
+            triedModules, exportMatches = {}, {}
+            local object = findModule(GameGui, "WorldMenu")
+            if object then
+                local read, result = readExport(object, math.min(moduleDeadline, os.clock() + 1))
+                if read and type(result) == "table" and type(rawget(result, "isDown")) == "function" then return result end
+                triedModules[object] = true
+            end
+            scanLoaded()
+            local match = exportMatches.WorldMenu
+            if match and exportsComplete and not match.Ambiguous then return match.Value end
+        end)
+        Session.MovementScan = false
+        if ok then return value end
+        warn("[n4th] Pencarian kontrol gerak: " .. tostring(value))
+    end
     function Session.resolveItems()
         if Session.ItemDBSource then return true end
-        if Session.ItemScan then return false end
+        if Session.ItemScan or Session.MovementScan then return false end
         Session.ItemScan = true
         lastGC = -math.huge
         bindingAt, boundDatabase = -math.huge, nil
@@ -1792,6 +1821,7 @@ I18N.PH = {
     { "Hentikan Auto Farm / Clear / Farmer dulu", "Stop Auto Farm / Clear / Farmer first" },
     { "atau nyalakan Keliling world", "or turn on Roam world" },
     { "Kontrol gerak game (WorldMenu.isDown) tidak ketemu", "Game movement control (WorldMenu.isDown) not found" },
+    { "Kontrol gerak", "Movement controls" },
     { "Fungsi pukul game belum ketemu", "Game punch function not found" },
     { "Seed habis: atur posisi & tile break di tab Pabrik supaya bisa dapat seed", "Out of seeds: set break position & tiles in the Factory tab to get seeds" },
     { "Config dihapus. Execute ulang untuk default", "Config deleted. Re-execute for defaults" },
@@ -2471,6 +2501,7 @@ end
 function Anim.consider(v)
     local tv = type(v)
     if tv == "table" then
+        if not Refs.MovementMenu and rawget(v, "isDown") and Session.isMovementMenu(v) then Refs.MovementMenu = v end
         if not Refs.World then
             local ok, isWorld = pcall(Anim.isWorld, v)
             if ok and isWorld then Refs.World = v end
@@ -2537,13 +2568,15 @@ function Anim.walkRefs(roots, limit)
         end
     end
     for _, root in ipairs(roots) do push(root) end
-    local fields = { "World", "world", "currentWorld", "activeWorld", "inventory", "inv", "controller", "state" }
+    local fields = { "World", "world", "currentWorld", "activeWorld", "inventory", "inv", "controller", "state",
+        "WorldMenu", "worldMenu", "menu", "input" }
     local budget = { next = os.clock() + 0.0015 }
     local index = 1
     while index <= #queue and alive() do
         local value = queue[index]
         Anim.consider(value)
-        if Refs.Inv and Refs.World and Refs.Punch and Refs.SetTile and Refs.State and Refs.Menu then break end
+        if Refs.Inv and Refs.World and Refs.Punch and Refs.SetTile and Refs.State and Refs.Menu
+            and (Refs.MovementMenu or Session.MovementMenu) then break end
         if type(value) == "function" then
             if isGameFn(value) then
                 for _, upvalue in pairs(getUpvalues(value)) do push(upvalue) end
@@ -2577,7 +2610,8 @@ local function findRefs()
         end
     end
     if Refs.World and Refs.Inv and Refs.SetTile and Refs.State and Refs.Punch
-        and Refs.Menu and Refs.Gems and Refs.Hud and Refs.Others then return true end
+        and Refs.Menu and Refs.Gems and Refs.Hud and Refs.Others
+        and (Refs.MovementMenu or Session.MovementMenu) then return true end
     if type(getgc) ~= "function" then
         Refs.ScanError = "Executor tidak punya getgc()"
         return Refs.World ~= nil, Refs.ScanError
@@ -2597,18 +2631,22 @@ local function findRefs()
         Refs.ScanCount += 1
         Anim.consider(v)
         if Refs.World and Refs.Inv and Refs.SetTile and Refs.State and Refs.Punch
-            and Refs.Menu and Refs.Gems and Refs.Hud and Refs.Others then break end
-        if (not Refs.World or not Refs.Inv) and type(v) == "function" and #roots < 1100 and isGameFn(v) then
+            and Refs.Menu and Refs.Gems and Refs.Hud and Refs.Others
+            and (Refs.MovementMenu or Session.MovementMenu) then break end
+        if (not Refs.World or not Refs.Inv or not (Refs.MovementMenu or Session.MovementMenu))
+            and type(v) == "function" and #roots < 1100 and isGameFn(v) then
             roots[#roots + 1] = v
         end
         Session.scanStep(budget, Refs.ScanCount)
     end
-    if not Refs.World or not Refs.Inv then
+    if not Refs.World or not Refs.Inv or not (Refs.MovementMenu or Session.MovementMenu) then
         local actions = {}
         if Refs.Punch then actions[#actions + 1] = Refs.Punch end
         if Refs.SetTile then actions[#actions + 1] = Refs.SetTile end
         Anim.walkRefs(actions, 300)
-        if not Refs.World or not Refs.Inv then Anim.walkRefs(roots, 2400) end
+        if not Refs.World or not Refs.Inv or not (Refs.MovementMenu or Session.MovementMenu) then
+            Anim.walkRefs(roots, 2400)
+        end
     end
     return Refs.World ~= nil
 end
@@ -2616,6 +2654,7 @@ end
 local function refsText()
     return "ItemDB: " .. (Session.ItemDBSource and "OK" or "TIDAK")
         .. " | World: " .. (Refs.World and "OK" or "TIDAK")
+        .. " | " .. I18N.T("Kontrol gerak") .. ": " .. (Session.MovementReady and "OK" or "TIDAK")
         .. " | Inventori: " .. (Refs.Inv and "OK" or "TIDAK")
         .. " | setTile: " .. (Refs.SetTile and "OK" or "cadangan")
         .. " | Posisi: " .. (Refs.State and "OK" or "cadangan")
@@ -3106,7 +3145,7 @@ function Anim.quickRefs()
         end
     end
     Refs.ConnectionCount = Anim.walkRefs(roots, 900)
-    if not Refs.World then
+    if not Refs.World or not (Refs.MovementMenu or Session.MovementMenu) then
         table.clear(roots)
         local folders = { ReplicatedStorage:FindFirstChild("WorldRemotes") or false, ReplicatedStorage }
         for _, folder in ipairs(folders) do
@@ -3659,18 +3698,59 @@ local function isDownWrapper(saved, key, ...)
     return OrigIsDown(saved, key, ...)
 end
 
-function Session.bindMovement()
-    if OrigIsDown or not MenuModOk or type(MenuModule) ~= "table" then return end
-    local original = rawget(MenuModule, "isDown")
-    if type(original) ~= "function" then return end
-    OrigIsDown = original
-    local ok, reason = pcall(function() MenuModule.isDown = isDownWrapper end)
+function Session.tryMovementMenu(menu)
+    if type(menu) ~= "table" then return false end
+    local original = rawget(menu, "isDown")
+    if original == isDownWrapper then return Session.MovementMenu == menu and OrigIsDown ~= nil end
+    if type(original) ~= "function" then return false end
+    local ok, reason = pcall(rawset, menu, "isDown", isDownWrapper)
     if not ok then
-        OrigIsDown = nil
         warn("[n4th] Kontrol gerak tidak bisa dihubungkan: " .. tostring(reason))
+        return false
     end
+    local previous = Session.MovementMenu
+    if previous and previous ~= menu and rawget(previous, "isDown") == isDownWrapper then
+        pcall(rawset, previous, "isDown", OrigIsDown)
+    end
+    Session.MovementMenu, OrigIsDown = menu, original
+    Session.MovementReady = true
+    MenuModule, MenuModOk = menu, true
+    return true
+end
+
+function Session.bindMovement(retry, deep)
+    if Session.tryMovementMenu(Refs.MovementMenu) then return true end
+    if Session.tryMovementMenu(Session.MovementMenu or MenuModule) then return true end
+    if not retry then return false end
+    pcall(Anim.quickRefs)
+    if Session.tryMovementMenu(Refs.MovementMenu) then return true end
+    if Session.tryMovementMenu(Session.resolveMovement()) then return true end
+    if deep then
+        pcall(findRefs)
+        if Session.tryMovementMenu(Refs.MovementMenu) then return true end
+    end
+    return false
 end
 Session.bindMovement()
+
+function Session.scheduleMovementRetry()
+    if OrigIsDown or Session.MovementRetry then return end
+    Session.MovementRetry = true
+    task.spawn(function()
+        for _, delay in ipairs({ 1, 2, 4 }) do
+            task.wait(delay)
+            if not alive() or OrigIsDown then break end
+            if not Session.Connecting then Session.bindMovement(true) end
+            if OrigIsDown then
+                UI.later("movement-ready", function()
+                    pcall(function() UI.RefInfo:SetDesc(refsText()) end)
+                end)
+                break
+            end
+        end
+        Session.MovementRetry = false
+    end)
+end
 
 -- Pasang walkspeed & fly tiap frame (game bisa menimpanya)
 table.insert(Connections, RunService.Heartbeat:Connect(function()
@@ -3693,6 +3773,7 @@ end
 local function validate()
     local doPlace = farmMode() ~= "Break saja"
     if not Refs.World then return "Data world belum ketemu. Tekan 'Hubungkan ke game'" end
+    if not Session.bindMovement(true) then return "Kontrol gerak game belum ketemu. Tekan 'Hubungkan ke game'" end
     if next(farmOffsets()) == nil then return "Pilih tile dulu di Grid Tile" end
     if not getPlayerTile() then return "Kamu belum masuk world" end
     if doPlace and not farmBlock() then return "Pilih block dari inventori" end
@@ -5713,7 +5794,7 @@ end
 local function checkAutoStart()
     if not Refs.World then return "Data world belum ketemu. Tekan 'Hubungkan ke game'" end
     if not Refs.Punch then return "Fungsi pukul game belum ketemu. Tekan 'Hubungkan ke game'" end
-    if not OrigIsDown then return "Kontrol gerak game (WorldMenu.isDown) tidak ketemu" end
+    if not Session.bindMovement(true) then return "Kontrol gerak game (WorldMenu.isDown) tidak ketemu" end
     if not playerState() then return "Kamu belum masuk world" end
     return nil
 end
@@ -6706,7 +6787,7 @@ local function spliceRoamLoop(runId)
 end
 
 local function startSpliceRoam()
-    if not OrigIsDown then return "Kontrol gerak game (WorldMenu.isDown) tidak ketemu" end
+    if not Session.bindMovement(true) then return "Kontrol gerak game (WorldMenu.isDown) tidak ketemu" end
     table.clear(Splice.Row)
     if not playerState() then return "Kamu belum masuk world" end
     if not Refs.Trees then findTreeRefs() end
@@ -7216,7 +7297,7 @@ do
         if not hasDropSpace(AutoDrop.X, AutoDrop.Y, 1) and not hasDropSpace(AutoDrop.X, AutoDrop.Y, -1) then
             return "Kedua sisi posisi drop terhalang"
         end
-        if not OrigIsDown then return "Kontrol gerak game belum ketemu" end
+        if not Session.bindMovement(true) then return "Kontrol gerak game belum ketemu" end
         if not Refs.Hud or type(rawget(Refs.Hud, "onDrop")) ~= "function" then return "Fungsi drop game belum ketemu" end
         return nil
     end
@@ -7840,7 +7921,7 @@ function Pabrik.start()
     local block = blockOfSeed(Pabrik.SeedId)
     if not Refs.World then
         err = "Data world belum ketemu. Tekan 'Hubungkan ke game'"
-    elseif not OrigIsDown then
+    elseif not Session.bindMovement(true, true) then
         err = "Kontrol gerak game (WorldMenu.isDown) tidak ketemu"
     elseif not playerState() then
         err = "Kamu belum masuk world"
@@ -8546,7 +8627,7 @@ function Vend.start()
     local err
     if not Refs.World then
         err = "Data world belum ketemu. Tekan 'Hubungkan ke game'"
-    elseif not OrigIsDown then
+    elseif not Session.bindMovement(true) then
         err = "Kontrol gerak game (WorldMenu.isDown) tidak ketemu"
     elseif not playerState() then
         err = "Kamu belum masuk world"
@@ -9855,7 +9936,7 @@ function Build.start(dirtMode)
         err = "Tunggu perjalanan drop selesai"
     elseif not Refs.World then
         err = "Data world belum ketemu. Tekan 'Hubungkan ke game'"
-    elseif not OrigIsDown then
+    elseif not Session.bindMovement(true) then
         err = "Kontrol gerak game (WorldMenu.isDown) tidak ketemu"
     elseif not playerState() then
         err = "Kamu belum masuk world"
@@ -14755,7 +14836,7 @@ function Session.refreshGameRefs(show)
     if Build.DirtRun then Build.stop("Dihentikan: hubungkan ulang ke game") end
     Auto.resetReach()
     -- Jangan pakai objek world atau fungsi dari dunia sebelumnya.
-    Refs.World, Refs.Inv = nil, nil
+    Refs.World, Refs.Inv, Refs.MovementMenu = nil, nil, nil
     Refs.SetTile, Refs.State, Refs.Punch, Refs.Menu = nil, nil, nil, nil
     Refs.Gems, Refs.Hud, Refs.Others, Refs.Arm = nil, nil, nil, nil
     Refs.Particles, Anim.Particles = {}, nil
@@ -14783,7 +14864,7 @@ function Session.refreshGameRefs(show)
     if Refs.ScanError then warn("[n4th] " .. Refs.ScanError) end
     local itemsReady = Session.resolveItems()
     if not alive() then return false end
-    Session.bindMovement()
+    Session.bindMovement(true)
     watchInventory()
     pcall(doInvRefresh, true) -- langsung di thread ini (thread INIT / antrian UI), bukan thread tombol
     if Refs.World then
@@ -14835,6 +14916,7 @@ local function reconnect(show)
     local ok, connected = pcall(Session.refreshGameRefs, show)
     Session.Connecting = false
     if ok then
+        Session.scheduleMovementRetry()
         Session.scheduleItemRetry()
         return connected
     end
@@ -15308,8 +15390,9 @@ Session.Cleanup = function()
     -- kembalikan fungsi game ke asal
     pcall(setLite, false)
     pcall(unhookJammer)
-    if OrigIsDown and MenuModOk and rawget(MenuModule, "isDown") == isDownWrapper then
-        MenuModule.isDown = OrigIsDown
+    local menu = Session.MovementMenu
+    if menu and OrigIsDown and rawget(menu, "isDown") == isDownWrapper then
+        pcall(rawset, menu, "isDown", OrigIsDown)
     end
     if Refs.World then
         if Misc.Ghost then pcall(function() Refs.World.ghost = false end) end
