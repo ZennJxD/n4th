@@ -9,7 +9,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = nama versi l
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-12-dropdown-layer-1"
+Session.Build = "2026-11-12-itemdb-active-refs-1"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -271,28 +271,28 @@ do
         for key in pairs(b) do if rawget(a, key) == nil then return false end end
         return true
     end
-    local function containsDatabase(a, b)
+    local function containsDatabase(a, b, deadline)
         local visited, work, checked = {}, { 0 }, 0
         for id, definition in pairs(b) do
             if type(id) == "number" and id >= 0 and id % 1 == 0 then
                 if not definitionEquals(rawget(a, id), definition, visited, work, 0) then return false end
                 checked += 1
                 if checked % 512 == 0 then
-                    if not alive() or os.clock() >= moduleDeadline then return false end
+                    if not alive() or os.clock() >= deadline then return false end
                     task.wait()
                 end
             end
         end
         return true
     end
-    local function resolveDatabase(match)
+    local function resolveDatabase(match, deadline)
         if match.Truncated then return nil end
         -- Pilih hanya jika semua definisi kandidat lain tercakup dan identik.
         -- Salinan tabel dan daftar subset yang koheren tidak dianggap konflik ID.
         for _, candidate in ipairs(match.Candidates) do
             local coherent = true
             for _, other in ipairs(match.Candidates) do
-                if not containsDatabase(candidate.Value, other.Value) then coherent = false break end
+                if not containsDatabase(candidate.Value, other.Value, deadline or moduleDeadline) then coherent = false break end
             end
             if coherent then return candidate end
         end
@@ -338,28 +338,61 @@ do
         return false
     end
     local bindingAt, boundDatabase = -math.huge, nil
+    local databaseFields = { "ItemDB", "itemDB", "Items", "items", "ItemsById", "ById", "byId" }
     local function recordItemDatabase(results, value, object)
         if isItemDatabase(value) then
             rememberMatch(results, "ItemDB", value, object)
             return
         end
-        for _, key in ipairs({ "ItemDB", "Items", "items", "ItemsById", "ById", "byId" }) do
+        for _, key in ipairs(databaseFields) do
             local nested = rawget(value, key)
             if type(nested) == "table" and isItemDatabase(nested) then
                 rememberMatch(results, "ItemDB", nested, object)
             end
         end
     end
-    local function inspectAction(results, fn, depth, visited)
-        if depth > 3 or visited[fn] then return end
-        visited[fn] = true
-        for _, value in pairs(readUpvalues(fn)) do
-            if type(value) == "table" then
-                pcall(recordItemDatabase, results, value)
-            elseif type(value) == "function" then
-                inspectAction(results, value, depth + 1, visited)
+    local actionFields = { "World", "world", "currentWorld", "controller", "data", "shared",
+        "tileChanged", "atTile", "backpackNow", "getItem", "itemDef" }
+    local function inspectAction(results, node, depth, visited)
+        if depth > 5 or (visited[node] and visited[node] <= depth) then return end
+        visited[node] = depth
+        local members = type(node) == "function" and readUpvalues(node) or nil
+        if members then
+            for _, value in pairs(members) do
+                if type(value) == "table" or type(value) == "function" then
+                    inspectAction(results, value, depth + 1, visited)
+                end
+            end
+        else
+            pcall(recordItemDatabase, results, node)
+            for _, key in ipairs(actionFields) do
+                local value = rawget(node, key)
+                if type(value) == "table" or type(value) == "function" then
+                    inspectAction(results, value, depth + 1, visited)
+                end
             end
         end
+    end
+    function Session.itemsFromReferences()
+        if Session.ItemDBSource then return true end
+        local refs = Session.References
+        if not refs then return false end
+        local results, visited = {}, {}
+        for _, root in pairs({ refs.Punch, refs.SetTile, refs.World }) do
+            inspectAction(results, root, 0, visited)
+        end
+        local found = results.ItemDB
+        if not found then return false end
+        if found.Ambiguous then
+            found = resolveDatabase(found, os.clock() + 1)
+            if not found then return false end
+        end
+        if not alive() then return false end
+        Session.ItemDBSource = found.Value
+        Session.Modules.ItemDB = "runtime:ItemDB"
+        Session.ModuleScan.DatabaseResolution = "referensi pukul, pasang, dan world aktif"
+        print("[n4th] ItemDB dikenali dari referensi game aktif.")
+        return true
     end
     local function databaseFromActions()
         if boundDatabase or os.clock() - bindingAt < 2 then return boundDatabase end
@@ -638,22 +671,28 @@ do
         if Session.ItemDBSource then return true end
         if Session.ItemScan then return false end
         Session.ItemScan = true
-        moduleDeadline, lastGC = os.clock() + 12, -math.huge
+        lastGC = -math.huge
         bindingAt, boundDatabase = -math.huge, nil
         runtimeComplete, exportsComplete, filteredTried = false, false, false
         runtimeMatches, exportMatches, triedModules, filteredMatches = {}, {}, {}, {}
         local ok, reason = pcall(function()
+            local found = Session.itemsFromReferences()
+            moduleDeadline = os.clock() + 12
             GameGui = PlayerGui:FindFirstChild("GameGui") or GameGui
             refreshIndex()
-            local _, value, object = loadModule(Shared, "ItemDB", true)
+            local value, object
+            if not found then
+                local _
+                _, value, object = loadModule(Shared, "ItemDB", true)
+            end
             Shared = (object and object.Parent) or Shared
+            Session.ItemDBSource = value or Session.ItemDBSource
             if not InventoryModule then
                 local _, inventory = loadModule(Shared, "Inventory", false)
                 InventoryModule = inventory
             end
             if not NetOk then NetOk, Net = loadModule(Shared, "Net", false) end
             if not MenuModOk then MenuModOk, MenuModule = loadModule(GameGui, "WorldMenu", false) end
-            Session.ItemDBSource = value
         end)
         Session.ItemScan = false
         if not ok then warn("[n4th] Pencarian ItemDB: " .. tostring(reason)) end
@@ -14766,12 +14805,37 @@ function Session.refreshGameRefs(show)
     return Refs.World ~= nil and itemsReady
 end
 
+function Session.scheduleItemRetry()
+    if Session.ItemDBSource or Session.ItemRetry or not Refs.World then return end
+    Session.ItemRetry = true
+    task.spawn(function()
+        for _, delay in ipairs({ 1, 2, 4 }) do
+            task.wait(delay)
+            if not alive() or Session.ItemDBSource then break end
+            if not Session.Connecting and not Session.ItemScan and Refs.World then
+                local ok, found = pcall(Session.itemsFromReferences)
+                if ok and found then
+                    UI.later("itemdb-recovered", function()
+                        pcall(doInvRefresh, true)
+                        pcall(function() UI.RefInfo:SetDesc(refsText()) end)
+                    end)
+                    break
+                end
+            end
+        end
+        Session.ItemRetry = false
+    end)
+end
+
 local function reconnect(show)
     if Session.Connecting then return false end
     Session.Connecting = true
     local ok, connected = pcall(Session.refreshGameRefs, show)
     Session.Connecting = false
-    if ok then return connected end
+    if ok then
+        Session.scheduleItemRetry()
+        return connected
+    end
     warn("[n4th] Koneksi game: " .. tostring(connected))
     pcall(function() UI.RefInfo:SetDesc(refsText()) end)
     if show then notify(show, refsText(), 5) end
