@@ -5,7 +5,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = nama versi l
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-12-dirt-farm-build-up-1"
+Session.Build = "2026-11-12-dirt-farm-resume-placement-1"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -718,7 +718,7 @@ local Land = {
 local Build = {
     Running = false,
     BlockId = nil,
-    Dirt = { X0 = 0, X1 = 99, Y0 = 2, Y1 = -1 },
+    Dirt = { X0 = 0, X1 = 99, Y0 = 2, Y1 = -1, Dig = false },
     UseBlock = true,     -- boleh taruh block pijakan kalau baris pertama tidak terjangkau
     Produce = true,      -- block kurang -> produksi dulu (tanam & panen) sampai cukup
     ThenPabrik = false,  -- selesai -> langsung jalankan Pabrik
@@ -976,6 +976,10 @@ local I18N = { Lang = "id", Saved = "id", Ask = false, Chosen = false }
 do (function() -- fungsi sendiri: variabel di dalam tidak ikut batas 200 local
 
 I18N.EN = {
+    ["Gali dulu"] = "Dig first",
+    ["Nyalakan untuk menggali farm baru. Matikan untuk lanjut pasang di farm yang sudah digali."] =
+        "Turn on to excavate a new farm. Leave off to resume placing blocks in an excavated farm.",
+    ["Isi lantai kosong dari bawah ke atas sesuai batas area."] = "Fill empty floor tiles from bottom to top within the selected area.",
     ["Menunggu karakter kembali ke pijakan farm"] = "Waiting for the character to return to a stable farm tile",
     ["Jalan ke titik drop"] = "Walking to the drop point",
     ["Drop ditunda karena item akan menutup jalur pulang"] = "Drop deferred because the stack would block the way back",
@@ -1419,6 +1423,7 @@ I18N.EN = {
 
 -- Frasa untuk teks yang berubah-ubah (status, notifikasi, pesan Discord)
 I18N.PH = {
+    { "Dirt habis, masih kurang", "Out of Dirt, still short" },
     { "Pasang Dirt dari bawah", "Placing Dirt from the bottom" },
     { "Dirt Farm selesai", "Dirt Farm complete" },
     { "lantai siap", "floors ready" },
@@ -1937,7 +1942,7 @@ Farmer.PlantMs = math.max(Farmer.PlantMs, 140)
 Config.add("Misc", Misc, { "Speed" })
 Config.add("Chat", Spam, { "Texts", "IntervalSec" })
 Config.add("Lahan", Land, { "X0", "X1", "Y0" })
-Config.add("DirtFarm", Build.Dirt, { "X0", "X1", "Y0", "Y1" })
+Config.add("DirtFarm", Build.Dirt, { "X0", "X1", "Y0", "Y1", "Dig" })
 Config.add("Bangun", Build, { "BlockId", "ThenPabrik", "BreakX", "BreakY", "Tiles" })
 Config.add("Vending", Vend, { "Mode", "Point", "Items", "DropX", "DropY" })
 Config.add("AutoDrop", AutoDrop, { "Items", "World", "X", "Y", "Facing" })
@@ -8330,6 +8335,7 @@ function Build.plan(dirt)
     local W = w.w
     local P = {
         rows = rows, K = #rows, W = W, dirt = dirt ~= nil,
+        placeOnly = dirt ~= nil and dirt.Dig == false,
         x0 = math.clamp(math.floor(math.min(bounds.X0, bounds.X1)), 0, W - 1),
         x1 = math.clamp(math.floor(math.max(bounds.X0, bounds.X1)), 0, W - 1),
         cols = {}, isLand = {}, holes = {},
@@ -8391,6 +8397,7 @@ end
 --   Lantai lahan di dalam tanah yang bolong (gua) / lava ditambal block sambil lewat.
 function Build.carveList(P, live)
     local W, list, kept = P.W, {}, 0
+    if P.placeOnly then return list, kept end
     local budget, visited = { next = os.clock() + 0.0015 }, 0
     local function add(x, y, kind)
         if y < 0 then return end
@@ -8732,6 +8739,10 @@ function Build.placeStep(P, live)
         local R = occupied and hitR or placeR
         if stateReaches(cur, t.x, t.y, R) and (onRow or under or entry[t.x]) then
             if occupied then
+                if P.placeOnly then
+                    skipTile(Build.Skip, t.idx, 30)
+                    continue
+                end
                 -- tile lahan berisi pohon / lava / hiasan: pecah dulu
                 if not canWorkAt(t.x, t.y) or (P.dirt and not Build.canDigTerrain(fgIdAt(t.x, t.y))) then
                     skipTile(Build.Skip, t.idx, 300)
@@ -9110,6 +9121,7 @@ local function buildLoop(runId, dirt)
     local o = { seed = seed, block = block, live = live, plan = dirt and dirt.plan }
     if o.plan then
         local P = o.plan
+        o.dugSwept = P.placeOnly
         o.area = function(x, y) return x >= P.x0 and x <= P.x1 and y >= P.rows[1] - 1 and y <= P.rows[P.K] end
     end
     local phase = nil
@@ -9117,13 +9129,13 @@ local function buildLoop(runId, dirt)
     while live() do
         task.wait()
         if not live() then break end
-        if dirt and raymanOn() then Build.stop("Lepas Rayman sebelum menjalankan Auto Dirt Farm") break end
+        if dirt and not o.plan.placeOnly and raymanOn() then Build.stop("Lepas Rayman sebelum menjalankan Auto Dirt Farm") break end
         local P = o.plan or Build.plan()
         if not P then
             Build.stop("Tidak ada baris lahan (cek X awal / X akhir / Y baris atas)")
             break
         end
-        if Build.Surface == nil then Build.Surface = Build.findSurface(P) end
+        if Build.Surface == nil and not P.placeOnly then Build.Surface = Build.findSurface(P) end
         local carve, kept = Build.carveList(P, live)
         if not live() then break end
         local info = landInfo(P, carve)
@@ -9136,7 +9148,7 @@ local function buildLoop(runId, dirt)
 
         -- 1) GALI dulu sampai bawah
         local r = "none"
-        if #carve > 0 and not (dirt and o.dugSwept and info.need > 0) then
+        if #carve > 0 and not (dirt and o.dugSwept) then
             Build.Reserve = 0
             Build.Phase = ("Gali: sisa %d tile"):format(#carve)
             r = Build.carveStep(P, carve, live)
@@ -9154,7 +9166,7 @@ local function buildLoop(runId, dirt)
             local have = invCount(block)
             if info.need == 0 then
                 -- tinggal tile gali yang dilewati: coba lagi sebentar
-                if #carve > 0 then
+                if #carve > 0 and not (dirt and o.dugSwept) then
                     noneAt = noneAt or os.clock()
                     local waited = os.clock() - noneAt
                     if waited < 45 then
@@ -9205,7 +9217,7 @@ local function buildLoop(runId, dirt)
                 end
                 break
             end
-            local reserve = (have >= info.need or not seed) and 0 or Build.RESERVE
+            local reserve = (P.placeOnly or have >= info.need or not seed) and 0 or Build.RESERVE
             if phase ~= "produksi" and have > reserve then
                 -- 2) PASANG (sisakan block untuk produksi kalau masih kurang)
                 phase = "pasang"
@@ -9236,6 +9248,16 @@ local function buildLoop(runId, dirt)
                 elseif pr ~= "none" then
                     noneAt = nil
                 end
+            elseif P.placeOnly then
+                Build.Phase = "Ambil Dirt sisa di lahan"
+                Build.sweep(P, live, { [block] = true }, 90)
+                if not live() then break end
+                if invCount(block) > 0 then
+                    o.placeNeed = nil
+                    continue
+                end
+                Build.stop(("Dirt habis, masih kurang %d tile lantai"):format(info.need))
+                break
             elseif not seed then
                 Build.stop(("Block habis, masih kurang %d (seed-nya tidak ketemu)"):format(info.need))
                 break
@@ -9351,7 +9373,7 @@ function Build.start(dirtMode)
             err = "Block Dirt tidak ditemukan di data item"
         elseif not plan then
             err = "Area Dirt Farm kosong. Cek batas X dan Y."
-        elseif raymanOn() then
+        elseif not plan.placeOnly and raymanOn() then
             err = "Lepas Rayman sebelum menjalankan Auto Dirt Farm"
         else
             dirt = {
@@ -12624,9 +12646,17 @@ do
         status = tab:Paragraph({ Title = "Status", Desc = "Siap membangun" })
     end)
     safe(function()
+        tab:Toggle({
+            Title = "Gali dulu",
+            Desc = "Nyalakan untuk menggali farm baru. Matikan untuk lanjut pasang di farm yang sudah digali.",
+            Value = settings.Dig,
+            Callback = function(on) settings.Dig = on end,
+        })
+    end)
+    safe(function()
         UI.DirtToggle = tab:Toggle({
             Title = "Jalankan Auto Dirt Farm",
-            Desc = "Bersihkan block dan background di celah serta tangga, lalu isi lantai dengan Dirt.",
+            Desc = "Isi lantai kosong dari bawah ke atas sesuai batas area.",
             Value = false,
             Callback = function(on)
                 if on then Build.start(true) elseif Build.DirtRun then Build.stop() end
