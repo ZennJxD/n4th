@@ -5,7 +5,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = nama versi l
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-12-dirt-farm-resume-placement-1"
+Session.Build = "2026-11-12-dirt-farm-sky-rows-1"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -979,7 +979,10 @@ I18N.EN = {
     ["Gali dulu"] = "Dig first",
     ["Nyalakan untuk menggali farm baru. Matikan untuk lanjut pasang di farm yang sudah digali."] =
         "Turn on to excavate a new farm. Leave off to resume placing blocks in an excavated farm.",
-    ["Isi lantai kosong dari bawah ke atas sesuai batas area."] = "Fill empty floor tiles from bottom to top within the selected area.",
+    ["Isi baris Dirt di atas permukaan tanah. Celah untuk tanaman dibuat selang satu tile."] =
+        "Fill Dirt rows above the surface with a one-tile gap for planting.",
+    ["Tidak ada baris pasang di atas permukaan dalam batas area"] = "No rows to place above the surface within the selected area",
+    ["Galian Dirt Farm selesai"] = "Dirt Farm excavation complete",
     ["Menunggu karakter kembali ke pijakan farm"] = "Waiting for the character to return to a stable farm tile",
     ["Jalan ke titik drop"] = "Walking to the drop point",
     ["Drop ditunda karena item akan menutup jalur pulang"] = "Drop deferred because the stack would block the way back",
@@ -1423,6 +1426,7 @@ I18N.EN = {
 
 -- Frasa untuk teks yang berubah-ubah (status, notifikasi, pesan Discord)
 I18N.PH = {
+    { "Baris pasang", "Placement rows" },
     { "Dirt habis, masih kurang", "Out of Dirt, still short" },
     { "Pasang Dirt dari bawah", "Placing Dirt from the bottom" },
     { "Dirt Farm selesai", "Dirt Farm complete" },
@@ -6561,7 +6565,11 @@ local function landInfo(P, carve)
     if not P then return info end
     local rows = P.rows
     info.rows = #rows
-    for k, y in ipairs(rows) do
+    if P.dirt and P.placeK and P.placeK > 0 then
+        info.placeTop, info.placeBottom = rows[1], rows[P.placeK]
+    end
+    for k = 1, P.placeK or #rows do
+        local y = rows[k]
         for _, x in ipairs(P.cols[k]) do
             info.total += 1
             if Build.done(x, y) then
@@ -8340,8 +8348,68 @@ function Build.plan(dirt)
         x1 = math.clamp(math.floor(math.max(bounds.X0, bounds.X1)), 0, W - 1),
         cols = {}, isLand = {}, holes = {},
     }
+    local stairOffset = 0
+    if dirt then
+        P.surface = Build.findSurface(P)
+        if P.surface == math.huge then
+            local s = playerState()
+            if bounds.Y1 and bounds.Y1 >= 1 then
+                P.surface = bounds.Y1 + 1
+            elseif s and s.grounded then
+                local _, y = startNode(s)
+                P.surface = y + 1
+            else
+                P.surface = w.h - 1
+            end
+        end
+        if P.placeOnly and bounds.Y0 == 2 then
+            -- Jika batas atas masih default, ikuti paritas deretan Dirt yang sudah ada.
+            local even, odd = 0, 0
+            local dirtId = Build.dirtBlock()
+            local width = P.x1 - P.x0 + 1
+            for y = 2, math.min(P.surface - 1, rows[#rows]) do
+                local blocks, airAbove = 0, 0
+                for x = P.x0, P.x1 do
+                    if fgIdAt(x, y) == dirtId then blocks += 1 end
+                    if fgIdAt(x, y - 1) == 0 then airAbove += 1 end
+                end
+                if blocks * 2 > width and airAbove * 2 > width then
+                    if y % 2 == 0 then even += 1 else odd += 1 end
+                end
+            end
+            if odd >= 2 and odd > even then
+                local aligned = table.clone(bounds)
+                aligned.Y0 = 3
+                local adjusted = landRows(aligned)
+                if #adjusted > 0 then
+                    rows = adjusted
+                    P.rows, P.K = rows, #rows
+                end
+            end
+        end
+        P.placeK = 0
+        for _, y in ipairs(rows) do
+            if y >= P.surface then break end
+            P.placeK += 1
+        end
+        if P.placeOnly and P.x1 - P.x0 >= 4 then
+            local score = 0
+            local dirtId = Build.dirtBlock()
+            for k = 1, P.placeK do
+                local y = rows[k]
+                local phase = k % 2 == 1 and 1 or -1
+                for _, edge in ipairs({ P.x0, P.x1 }) do
+                    local outer = fgIdAt(edge, y)
+                    local inner = fgIdAt(edge + (edge == P.x0 and 1 or -1), y)
+                    if outer == 0 and inner == dirtId then score += phase end
+                    if outer == dirtId and inner == 0 then score -= phase end
+                end
+            end
+            if score <= -2 then stairOffset = 1 end
+        end
+    end
     for k = 1, #rows do
-        local cols = landCols(k - 1, P.x0, P.x1)
+        local cols = landCols(k - 1 + stairOffset, P.x0, P.x1)
         local set = {}
         for _, x in ipairs(cols) do set[x] = true end
         local holes = {}
@@ -8445,7 +8513,7 @@ function Build.carveList(P, live)
                 Session.scanStep(budget, visited)
                 if live and not live() then return list, kept end
             end
-            if L[x] then fill(x, y) end -- lantai dulu, baru celah di atasnya
+            if not P.dirt and L[x] then fill(x, y) end -- tambal lantai saat menggali Bangun Lahan
             add(x, y - 1, "gap")
             if x == up then add(x, P.rows[k - 1], "hole") end
         end
@@ -8690,7 +8758,7 @@ function Build.placeStep(P, live)
     local placeR, hitR = Build.placeReach(), punchReach() - 0.08
     local now = os.clock()
     local k, T = nil, nil
-    for kk = P.K, 1, -1 do
+    for kk = P.placeK or P.K, 1, -1 do
         local y = P.rows[kk]
         local list = {}
         local incomplete = false
@@ -8712,7 +8780,8 @@ function Build.placeStep(P, live)
     if not k then return "none" end
     local y = P.rows[k]
     if P.dirt then
-        Build.Phase = ("Pasang Dirt dari bawah: baris %d/%d (Y %d)"):format(P.K - k + 1, P.K, y)
+        local count = P.placeK or P.K
+        Build.Phase = ("Pasang Dirt dari bawah: baris %d/%d (Y %d)"):format(count - k + 1, count, y)
     end
     local px = s.x
     table.sort(T, function(a, b) return abs(a.x + 0.5 - px) < abs(b.x + 0.5 - px) end)
@@ -8838,7 +8907,7 @@ function Build.prodRow(P)
         end
         return true
     end
-    for k = P.K, 1, -1 do
+    for k = P.placeK or P.K, 1, -1 do
         if not complete(k) then
             if k < P.K then return k + 1 end
             break
@@ -9135,7 +9204,7 @@ local function buildLoop(runId, dirt)
             Build.stop("Tidak ada baris lahan (cek X awal / X akhir / Y baris atas)")
             break
         end
-        if Build.Surface == nil and not P.placeOnly then Build.Surface = Build.findSurface(P) end
+        if Build.Surface == nil and not P.placeOnly then Build.Surface = P.surface or Build.findSurface(P) end
         local carve, kept = Build.carveList(P, live)
         if not live() then break end
         local info = landInfo(P, carve)
@@ -9205,6 +9274,8 @@ local function buildLoop(runId, dirt)
                     local remaining = #carve + kept
                     if remaining > 0 then
                         Build.stop(("Dirt Farm: %d lantai siap, %d tile belum terbuka"):format(info.done, remaining))
+                    elseif P.placeK == 0 then
+                        Build.stop("Galian Dirt Farm selesai")
                     else
                         Build.stop(("Dirt Farm selesai (%d lantai)"):format(info.done))
                     end
@@ -9373,6 +9444,8 @@ function Build.start(dirtMode)
             err = "Block Dirt tidak ditemukan di data item"
         elseif not plan then
             err = "Area Dirt Farm kosong. Cek batas X dan Y."
+        elseif plan.placeOnly and plan.placeK == 0 then
+            err = "Tidak ada baris pasang di atas permukaan dalam batas area"
         elseif not plan.placeOnly and raymanOn() then
             err = "Lepas Rayman sebelum menjalankan Auto Dirt Farm"
         else
@@ -12656,7 +12729,7 @@ do
     safe(function()
         UI.DirtToggle = tab:Toggle({
             Title = "Jalankan Auto Dirt Farm",
-            Desc = "Isi lantai kosong dari bawah ke atas sesuai batas area.",
+            Desc = "Isi baris Dirt di atas permukaan tanah. Celah untuk tanaman dibuat selang satu tile.",
             Value = false,
             Callback = function(on)
                 if on then Build.start(true) elseif Build.DirtRun then Build.stop() end
@@ -12718,7 +12791,12 @@ do
                 local bottom = settings.Y1 >= 1 and tostring(settings.Y1) or "bedrock"
                 local text = ("%s\nX %d–%d | Y %d–%s | Dirt ×%d"):format(I18N.T(phase),
                     settings.X0, settings.X1, settings.Y0, bottom, id and invCount(id) or 0)
-                if info then text ..= ("\n%d/%d block | %d tile"):format(info.done, info.total, info.carve + info.kept) end
+                if info then
+                    text ..= ("\n%d/%d block | %d tile"):format(info.done, info.total, info.carve + info.kept)
+                    if info.placeTop then
+                        text ..= ("\n%s: Y %d–%d"):format(I18N.T("Baris pasang"), info.placeTop, info.placeBottom)
+                    end
+                end
                 if shown ~= text then
                     shown = text
                     pcall(function() status:SetDesc(text) end)
