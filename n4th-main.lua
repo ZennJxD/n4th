@@ -5,7 +5,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = nama versi l
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-12-shorter-routes-1"
+Session.Build = "2026-11-12-dirt-farm-batch-planting-1"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -5985,14 +5985,24 @@ local function farmerScan(px, py, maxN, filter)
     end)
     for _, y in ipairs(order) do
         local list = rows[y]
-        table.sort(list, function(a, b) return a.x < b.x end) -- dari kiri ke kanan
+        table.sort(list, function(a, b)
+            if FC.bulkPlant then
+                local da, db = abs(a.x - px), abs(b.x - px)
+                if da ~= db then return da < db end
+            end
+            return a.x < b.x
+        end)
         for _, t in ipairs(list) do
             if plantSpotOk(t.x, t.y, FC.seed) then
                 if FC.row then FC.row.y = y end
-                return { t }, nextReady
+                if not FC.bulkPlant then return { t }, nextReady end
+                best[#best + 1] = t
+                if #best >= maxN then break end
+            else
+                skipTile(FC.skip, t.idx, 120)
             end
-            skipTile(FC.skip, t.idx, 120)
         end
+        if #best > 0 then return best, nextReady end
     end
     if FC.row then FC.row.y = nil end
     return best, nextReady
@@ -8919,8 +8929,9 @@ function Build.cfg(o, harvest, plant)
         seed = o.seed,
         only = o.seed,           -- hanya panen pohon seed block ini
         allowHarvest = o.allowHarvest,
-        placeReach = o.plan and o.plan.placeOnly and Build.placeReach() or nil,
-        plantArea = o.plan and o.plan.placeOnly and o.area or nil,
+        placeReach = o.plan and Build.placeReach() or nil,
+        plantArea = o.plan and o.area or nil,
+        bulkPlant = o.plan ~= nil,
         skip = Build.FieldSkip,
         hms = Farmer.HarvestMs,
         pms = Farmer.PlantMs,
@@ -9146,13 +9157,15 @@ function Build.produceStep(o)
         FC = Build.cfg(o, true, false)
         local r = fieldStep()
         if r == "idle" then
+            if o.plan then o.harvestRetryAt = os.clock() + 3 end
             o.phase = "tanam"
             return "next"
         end
         return r
     end
     if o.phase == "tanam" then
-        if invCount(o.seed) > 0 and Build.freeSpots(o) > 0 then
+        -- Dirt Farm terus cari petak kosong meski sebagian pohon sudah tumbuh.
+        if invCount(o.seed) > 0 and (o.plan or Build.freeSpots(o) > 0) then
             FC = Build.cfg(o, false, true)
             local r = fieldStep()
             if r ~= "idle" then return r end
@@ -9174,7 +9187,8 @@ function Build.produceStep(o)
     end
     -- TUNGGU
     local n, nxt = readyTreeCount(false, o.seed, o.plan)
-    if n > 0 and (nxt == nil or nxt > 20) then
+    if n > 0 and ((o.plan and os.clock() >= (o.harvestRetryAt or 0))
+        or (not o.plan and (nxt == nil or nxt > 20))) then
         o.phase = "panen" -- pohon siap sekaligus
         return "next"
     end
@@ -9415,14 +9429,14 @@ local function buildLoop(runId, dirt)
                     end
                     if o.rowK and not P.rows[o.rowK] then o.rowK = nil end
                     if o.rowK == nil then
-                        o.rowK = not P.placeOnly and Build.prodRow(P) or false
+                        o.rowK = not dirt and Build.prodRow(P) or false
                         table.clear(Build.Row)
                         if o.rowK then
                             local sp = Build.prodSpots(P, o.rowK)
                             o.plantSet, o.stand, o.tile, o.exclude = sp.set, sp.stand, sp.tile, nil
                         else -- belum ada baris lengkap: tanam di mana saja di luar tile lahan
                             o.plantSet, o.stand, o.tile, o.exclude = nil, nil, nil, landBlockSet(P)
-                            if P.placeOnly then
+                            if dirt then
                                 -- Seed hanya di atas pijakan yang ada, di luar lantai dan akses tangga.
                                 for k, y in ipairs(P.rows) do
                                     for _, x in ipairs(P.holes[k]) do
@@ -9456,9 +9470,11 @@ local function buildLoop(runId, dirt)
                     end
                     if dirt then
                         local current = invCount(block)
-                        if current > (o.productionHave or 0) or nextReady then
+                        local treeActions = Build.Planted + Build.Harvested
+                        if current > (o.productionHave or 0) or treeActions ~= o.treeActions or nextReady then
                             o.productionSince = os.clock()
                         end
+                        o.treeActions = treeActions
                         o.productionHave = current
                         if os.clock() - o.productionSince > 90 then
                             Build.stop("Produksi Dirt tidak bertambah. Tambahkan Dirt atau cek ruang tanam.")
