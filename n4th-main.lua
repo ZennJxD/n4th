@@ -9,7 +9,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = nama versi l
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-12-dirt-last-block-compat-1"
+Session.Build = "2026-11-12-windui-icon-startup-1"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -620,13 +620,55 @@ do
         "https://github.com/Footagesus/WindUI/releases/download/1.6.66/main.lua",
     }
 
-    -- WindUI sudah membawa ikon bawaan. Hindari unduhan ikon, file opsional, dan akses CoreGui.
+    -- WindUI 1.6.66 memakai remote GetIcons pada jalur tanpa writefile. GrowBlox tidak memilikinya.
     local prelude = [[
-local __n4thGui = ...
+local __n4thGui, __n4thIcons = ...
 local writefile, cloneref, clonereference
 local function gethui() return __n4thGui end
 local function protectgui() end
 ]]
+    local icons = {
+        x = "rbxassetid://110786993356448",
+        minus = "rbxassetid://118026365011536",
+        maximize = "rbxassetid://76045941763188",
+        minimize = "rbxassetid://121304296213645",
+        ["maximize-2"] = "rbxassetid://73085922906397",
+        ["minimize-2"] = "rbxassetid://116269596042539",
+        ["chevron-up"] = "rbxassetid://122444883127455",
+        ["chevron-down"] = "rbxassetid://134243273101015",
+        search = "rbxassetid://121018724060431",
+        sprout = "rbxassetid://100091687832508",
+    }
+    local iconModule = {
+        SetIconsType = function() end,
+        Init = function() end,
+        AddIcons = function(_, pack)
+            for name, asset in pairs(pack) do
+                if type(asset) == "string" then icons[name] = asset end
+            end
+        end,
+        Icon2 = function(name)
+            if type(name) ~= "string" or name:match("^rbxasset") then return nil end
+            local key = name:match("^lucide:(.+)$") or name
+            return { icons[key] or "", { ImageRectSize = Vector2.new(), ImageRectPosition = Vector2.new() } }
+        end,
+    }
+    local loadedIcons = false
+    task.spawn(function()
+        local ok, pack = pcall(function()
+            local source = Session.download("https://raw.githubusercontent.com/Footagesus/Icons/46d30c19ba7bc601d6ec794a48dc3a89568b1eec/lucide/dist/Icons.lua")
+            return assert(loadstring(source))()
+        end)
+        if ok and type(pack) == "table" then iconModule.AddIcons("lucide", pack) end
+        loadedIcons = true
+    end)
+    local function prepareWindUI(source)
+        local first, last = source:find("m=a.load'b'", 1, true)
+        if not first or source:find("m=a.load'b'", last + 1, true) then
+            return nil, "titik inisialisasi ikon WindUI 1.6.66 tidak cocok"
+        end
+        return prelude .. source:sub(1, first - 1) .. "m=__n4thIcons" .. source:sub(last + 1)
+    end
     local function downloadWindUI()
         local lastError = "respons kosong"
         for attempt = 1, 2 do
@@ -639,12 +681,17 @@ local function protectgui() end
                 elseif source:match("^%s*<") then
                     lastError = "server mengirim HTML, bukan Lua (mungkin 504 Gateway Time-out)"
                 else
-                    local compiled, fn, compileError = pcall(loadstring, prelude .. source, "WindUI")
-                    if not compiled or type(fn) ~= "function" then
-                        compiled, fn, compileError = pcall(loadstring, prelude .. source)
+                    local prepared, reason = prepareWindUI(source)
+                    if prepared then
+                        local compiled, fn, compileError = pcall(loadstring, prepared, "WindUI")
+                        if not compiled or type(fn) ~= "function" then
+                            compiled, fn, compileError = pcall(loadstring, prepared)
+                        end
+                        if compiled and type(fn) == "function" then return fn end
+                        lastError = tostring(compiled and compileError or fn)
+                    else
+                        lastError = reason
                     end
-                    if compiled and type(fn) == "function" then return fn end
-                    lastError = tostring(compiled and compileError or fn)
                 end
                 warn("[n4th] Unduh WindUI gagal: " .. url .. " | " .. lastError)
             end
@@ -654,7 +701,10 @@ local function protectgui() end
     end
 
     -- Inisialisasi hanya sekali, setelah respons berhasil dikompilasi.
-    WindUI = downloadWindUI()(PlayerGui)
+    local runWindUI = downloadWindUI()
+    local deadline = os.clock() + 1.5
+    while not loadedIcons and alive() and os.clock() < deadline do task.wait(0.05) end
+    WindUI = runWindUI(PlayerGui, iconModule)
     pcall(function()
         WindUI.ScreenGui.DisplayOrder = 900
         WindUI.ScreenGui.ResetOnSpawn = false
