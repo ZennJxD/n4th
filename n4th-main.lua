@@ -9,7 +9,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = nama versi l
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-12-movement-reconnect-1"
+Session.Build = "2026-11-13-runtime-access-1"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -20,6 +20,23 @@ local getmodules = getmodules or get_modules
 local gethui = gethui or get_hidden_gui
 local getconnections = getconnections or get_connections
 local getloadedmodules = getloadedmodules or get_loaded_modules
+function Session.runtimeObjects()
+    if type(getgc) ~= "function" then return nil, "Executor tidak punya getgc()" end
+    local function read(includeTables)
+        local ok, objects
+        if includeTables then ok, objects = pcall(getgc, true) else ok, objects = pcall(getgc) end
+        if not ok then return nil, tostring(objects) end
+        if type(objects) ~= "table" then return nil, "hasil bukan tabel" end
+        for _, value in pairs(objects) do
+            if type(value) == "table" or type(value) == "function" then return objects, nil, true end
+        end
+        return objects
+    end
+    local objects, reason, readable = read(true)
+    if readable then return objects, nil, true end
+    local fallback, fallbackReason, fallbackReadable = read(false)
+    return fallbackReadable and fallback or objects or fallback, fallbackReason or reason, fallbackReadable == true
+end
 function Session.connectionFunction(connection)
     if type(connection) == "function" then return connection end
     local ok, fn = pcall(function() return connection.Function end)
@@ -489,11 +506,11 @@ do
         if runtimeComplete and not retry then return end
         if os.clock() - lastGC < 3 or type(getgc) ~= "function" then return end
         lastGC = os.clock()
-        local ok, objects = pcall(getgc, true)
-        if not ok or type(objects) ~= "table" or not next(objects) then ok, objects = pcall(getgc) end
-        if not ok or type(objects) ~= "table" then return end
+        local objects, _, readable = Session.runtimeObjects()
+        if not objects then return end
         runtimeMatches = {}
         runtimeComplete = true
+        if not readable then return end
         local visited, actionCandidates = 0, {}
         local budget = { next = os.clock() + 0.0015 }
         for _, value in pairs(objects) do
@@ -541,7 +558,15 @@ do
             done = true
         end)
         while alive() and not done and os.clock() < untilTime do task.wait(0.05) end
-        if done then return ok, value end
+        if done then
+            if not ok then
+                local message = tostring(value):lower()
+                if message:find("not allowed", 1, true) or message:find("cannot require", 1, true) then
+                    Session.ModuleScan.RequireDenied = true
+                end
+            end
+            return ok, value
+        end
         if task.cancel and worker then pcall(task.cancel, worker) end
         return false, "batas waktu membaca export"
     end
@@ -696,7 +721,7 @@ do
         if ok then return value end
         warn("[n4th] Pencarian kontrol gerak: " .. tostring(value))
     end
-    function Session.resolveItems()
+    function Session.resolveItems(quick)
         if Session.ItemDBSource then return true end
         if Session.ItemScan or Session.MovementScan then return false end
         Session.ItemScan = true
@@ -706,13 +731,13 @@ do
         runtimeMatches, exportMatches, triedModules, filteredMatches = {}, {}, {}, {}
         local ok, reason = pcall(function()
             local found = Session.itemsFromReferences()
-            moduleDeadline = os.clock() + 12
+            moduleDeadline = os.clock() + (quick and 4 or 12)
             GameGui = PlayerGui:FindFirstChild("GameGui") or GameGui
             refreshIndex()
             local value, object
             if not found then
                 local _
-                _, value, object = loadModule(Shared, "ItemDB", true)
+                _, value, object = loadModule(Shared, "ItemDB", not quick)
             end
             Shared = (object and object.Parent) or Shared
             Session.ItemDBSource = value or Session.ItemDBSource
@@ -1223,6 +1248,9 @@ do (function() -- fungsi sendiri: variabel di dalam tidak ikut batas 200 local
 I18N.EN = {
     ["Data item belum terbaca. Tekan Hubungkan ke game untuk coba lagi."] =
         "Item data is unavailable. Press Connect to game to retry.",
+    ["Executor tidak menampilkan tabel atau callback game."] = "The executor exposes no game tables or callbacks.",
+    ["Executor tidak menampilkan tabel atau callback game dan menolak akses modul."] =
+        "The executor exposes no game tables or callbacks and denies module access.",
     ["Isi ulang Dirt dari drop atau Dirt Seed, lalu lanjut pasang."] = "Refill Dirt from drops or Dirt Seeds, then resume building.",
     ["Ambil Dirt dan Dirt Seed di lahan"] = "Collecting Dirt and Dirt Seeds in the farm",
     ["Data pohon belum terbaca. Hubungkan ulang ke game untuk isi ulang Dirt."] =
@@ -2599,6 +2627,7 @@ end
 local function findRefs()
     -- Reconnect sudah mengosongkan referensi lama. Pertahankan hasil koneksi input aktif.
     Refs.ScanCount, Refs.ScanError = 0, nil
+    Refs.RuntimeReadable = nil
     local filter = filtergc or filter_gc
     if not Refs.World and type(filter) == "function" then
         local ok, worlds = pcall(filter, "table", { Keys = { "fg", "bg", "w", "h" } }, false)
@@ -2612,14 +2641,14 @@ local function findRefs()
     if Refs.World and Refs.Inv and Refs.SetTile and Refs.State and Refs.Punch
         and Refs.Menu and Refs.Gems and Refs.Hud and Refs.Others
         and (Refs.MovementMenu or Session.MovementMenu) then return true end
-    if type(getgc) ~= "function" then
-        Refs.ScanError = "Executor tidak punya getgc()"
+    local objects, reason, readable = Session.runtimeObjects()
+    Refs.RuntimeReadable = readable == true
+    if not objects then
+        Refs.ScanError = reason
         return Refs.World ~= nil, Refs.ScanError
     end
-    local gcOk, objects = pcall(getgc, true)
-    if not gcOk or type(objects) ~= "table" or not next(objects) then gcOk, objects = pcall(getgc) end
-    if not gcOk or type(objects) ~= "table" then
-        Refs.ScanError = "getgc gagal: " .. tostring(objects)
+    if not readable then
+        Refs.ScanError = "getgc tidak mengembalikan tabel atau fungsi"
         return Refs.World ~= nil, Refs.ScanError
     end
     -- Hasil getgc executor dapat berlubang atau memakai key non-urutan.
@@ -2652,7 +2681,7 @@ local function findRefs()
 end
 
 local function refsText()
-    return "ItemDB: " .. (Session.ItemDBSource and "OK" or "TIDAK")
+    local summary = "ItemDB: " .. (Session.ItemDBSource and "OK" or "TIDAK")
         .. " | World: " .. (Refs.World and "OK" or "TIDAK")
         .. " | " .. I18N.T("Kontrol gerak") .. ": " .. (Session.MovementReady and "OK" or "TIDAK")
         .. " | Inventori: " .. (Refs.Inv and "OK" or "TIDAK")
@@ -2664,6 +2693,10 @@ local function refsText()
         .. " | Pemain: " .. (Refs.Others and "OK" or "TIDAK")
         .. " | Animasi: " .. (Anim.fn and "OK" or "TIDAK")
         .. " | Dropdown: " .. (UI.DropErr and ("ERROR " .. tostring(UI.DropErr)) or (UI.DropOk and "OK" or "-"))
+    if Session.RuntimeAccessMessage then
+        return I18N.T(Session.RuntimeAccessMessage) .. "\n" .. summary
+    end
+    return summary
 end
 
 ---------------------------------------------------------------------
@@ -14843,6 +14876,7 @@ function Session.refreshGameRefs(show)
     Refs.Trees, Refs.TreeMode, Refs.TreeP = nil, nil, nil
     Drops.list, Drops.update = nil, nil
     Refs.ConnectionCount = 0
+    Session.RuntimeAccessMessage = nil
     -- 1) cari isi tas cepat lalu langsung isi dropdown (tidak menunggu scan getgc yang lama)
     pcall(Anim.quickRefs)
     if Refs.Inv and Session.ItemDBSource then
@@ -14862,9 +14896,17 @@ function Session.refreshGameRefs(show)
     findRefs()
     if not alive() then return false end
     if Refs.ScanError then warn("[n4th] " .. Refs.ScanError) end
-    local itemsReady = Session.resolveItems()
+    local noRuntime = not Refs.World and not Refs.Inv and Refs.RuntimeReadable == false
+        and Refs.ConnectionCount == 0
+    local itemsReady = Session.resolveItems(noRuntime)
     if not alive() then return false end
-    Session.bindMovement(true)
+    if noRuntime and not Refs.World then
+        Session.RuntimeAccessMessage = Session.ModuleScan.RequireDenied
+            and "Executor tidak menampilkan tabel atau callback game dan menolak akses modul."
+            or "Executor tidak menampilkan tabel atau callback game."
+        warn("[n4th] " .. Session.RuntimeAccessMessage)
+    end
+    Session.bindMovement(not noRuntime)
     watchInventory()
     pcall(doInvRefresh, true) -- langsung di thread ini (thread INIT / antrian UI), bukan thread tombol
     if Refs.World then
@@ -14882,7 +14924,9 @@ function Session.refreshGameRefs(show)
         .. " | callbacks=" .. tostring(Refs.ConnectionCount or 0) .. " | " .. refsText())
     if show then
         local message = refsText()
-        if not Refs.World then message = I18N.T("Data world belum ketemu. Tekan 'Hubungkan ke game'") .. "\n" .. message end
+        if not Refs.World and not Session.RuntimeAccessMessage then
+            message = I18N.T("Data world belum ketemu. Tekan 'Hubungkan ke game'") .. "\n" .. message
+        end
         notify(show, message, 5)
     end
     return Refs.World ~= nil and itemsReady
@@ -14916,7 +14960,7 @@ local function reconnect(show)
     local ok, connected = pcall(Session.refreshGameRefs, show)
     Session.Connecting = false
     if ok then
-        Session.scheduleMovementRetry()
+        if not Session.RuntimeAccessMessage then Session.scheduleMovementRetry() end
         Session.scheduleItemRetry()
         return connected
     end
