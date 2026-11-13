@@ -9,7 +9,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = nama versi l
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-13-runtime-access-1"
+Session.Build = "2026-11-13-noclip-toggle-1"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -1392,7 +1392,10 @@ I18N.EN = {
     ["Refresh daftar"] = "Refresh list",
     ["Lompat di udara (bisa kena rollback)"] = "Jump mid-air (may get rolled back)",
     ["Fly + Tembus Block"] = "Fly + Noclip",
-    ["Tembus block, pakai tombol ▲/▼ (bisa kena rollback)"] = "Pass through blocks, use the ▲/▼ buttons (may get rolled back)",
+    ["Pakai ▲/▼ untuk Fly. Pindah ke ruang kosong sebelum mematikan. Menembus block bisa kena kick."] =
+        "Use ▲/▼ to fly. Move into open space before turning it off. Passing through blocks can trigger a kick.",
+    ["Karakter masih bertabrakan dengan block. Pindah ke ruang kosong lalu matikan lagi."] =
+        "Your character still overlaps a block. Move into open space and turn it off again.",
     ["Bahasa / Language"] = "Language / Bahasa",
     ["Titik Drop"] = "Drop Point", ["Atur titik drop"] = "Set drop point", ["Drop otomatis"] = "Auto drop",
     ["Pantau item penuh"] = "Monitor full stacks",
@@ -3700,7 +3703,13 @@ local function setInfJump(on)
     if on then hookJammer() else unhookJammer() end
 end
 
-local function setGhost(on)
+local function setGhost(on, checkCollision)
+    if not on and checkCollision and Misc.Ghost and Session.ghostBodyBlocked() then
+        Misc.UpHeld, Misc.DownHeld = false, false
+        if UI.GhostToggle then pcall(function() UI.GhostToggle:Set(true, false) end) end
+        notify("Fly + Tembus Block", "Karakter masih bertabrakan dengan block. Pindah ke ruang kosong lalu matikan lagi.", 5)
+        return
+    end
     Misc.Ghost = on
     if not on then
         Misc.UpHeld, Misc.DownHeld = false, false
@@ -4160,6 +4169,18 @@ local function solidAt(x, y)
         return not (ok and may)
     end
     return it.solid and true or false
+end
+
+function Session.ghostBodyBlocked()
+    local s = playerState()
+    if not s or not Refs.World or not Session.ItemDBSource then return false end
+    -- Pakai ukuran tabrakan karakter dari boxHits di client game.
+    for y = floor(s.y - 0.95), floor(s.y - 0.0001) do
+        for x = floor(s.x - 0.3), floor(s.x + 0.3 - 0.0001) do
+            if solidAt(x, y) then return true end
+        end
+    end
+    return false
 end
 
 -- Tile berbahaya (lava, duri, laser)
@@ -15165,9 +15186,9 @@ do
     safe(function()
         UI.GhostToggle = character:Toggle({
             Title = "Fly + Tembus Block",
-            Desc = "Tembus block, pakai tombol ▲/▼ (bisa kena rollback)",
+            Desc = "Pakai ▲/▼ untuk Fly. Pindah ke ruang kosong sebelum mematikan. Menembus block bisa kena kick.",
             Value = false,
-            Callback = function(on) setGhost(on) end,
+            Callback = function(on) setGhost(on, true) end,
         })
     end)
 
