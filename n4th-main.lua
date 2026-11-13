@@ -9,7 +9,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = nama versi l
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-13-noclip-toggle-1"
+Session.Build = "2026-11-13-noclip-toggle-2"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -1396,6 +1396,10 @@ I18N.EN = {
         "Use ▲/▼ to fly. Move into open space before turning it off. Passing through blocks can trigger a kick.",
     ["Karakter masih bertabrakan dengan block. Pindah ke ruang kosong lalu matikan lagi."] =
         "Your character still overlaps a block. Move into open space and turn it off again.",
+    ["Posisi atau data block belum terbaca. Hubungkan ke game lalu coba lagi."] =
+        "Position or block data is unavailable. Connect to the game and try again.",
+    ["Lepas tombol gerak dan tunggu karakter berhenti sebelum mematikan Fly."] =
+        "Release movement controls and wait for your character to stop before turning Fly off.",
     ["Bahasa / Language"] = "Language / Bahasa",
     ["Titik Drop"] = "Drop Point", ["Atur titik drop"] = "Set drop point", ["Drop otomatis"] = "Auto drop",
     ["Pantau item penuh"] = "Monitor full stacks",
@@ -3704,11 +3708,20 @@ local function setInfJump(on)
 end
 
 local function setGhost(on, checkCollision)
-    if not on and checkCollision and Misc.Ghost and Session.ghostBodyBlocked() then
-        Misc.UpHeld, Misc.DownHeld = false, false
-        if UI.GhostToggle then pcall(function() UI.GhostToggle:Set(true, false) end) end
-        notify("Fly + Tembus Block", "Karakter masih bertabrakan dengan block. Pindah ke ruang kosong lalu matikan lagi.", 5)
-        return
+    if checkCollision and on ~= Misc.Ghost then
+        local checked, clear, reason = pcall(Session.checkGhostPosition)
+        local message
+        if not checked or clear == nil then
+            message = "Posisi atau data block belum terbaca. Hubungkan ke game lalu coba lagi."
+        elseif not on and not clear then
+            message = reason
+        end
+        if message then
+            Misc.UpHeld, Misc.DownHeld = false, false
+            if UI.GhostToggle then pcall(function() UI.GhostToggle:Set(Misc.Ghost, false) end) end
+            notify("Fly + Tembus Block", message, 5)
+            return
+        end
     end
     Misc.Ghost = on
     if not on then
@@ -4171,16 +4184,28 @@ local function solidAt(x, y)
     return it.solid and true or false
 end
 
-function Session.ghostBodyBlocked()
+function Session.checkGhostPosition()
     local s = playerState()
-    if not s or not Refs.World or not Session.ItemDBSource then return false end
+    local w = Refs.World
+    if not s or not w or type(w.fg) ~= "table" or not Session.ItemDBSource
+        or not (math.abs(s.x) < math.huge and math.abs(s.y) < math.huge) then return nil end
     -- Pakai ukuran tabrakan karakter dari boxHits di client game.
     for y = floor(s.y - 0.95), floor(s.y - 0.0001) do
         for x = floor(s.x - 0.3), floor(s.x + 0.3 - 0.0001) do
-            if solidAt(x, y) then return true end
+            if x >= 0 and x < w.w and y >= 0 and y < w.h then
+                if type(w.fg[y]) ~= "table" then return nil end
+                local id = fgIdAt(x, y)
+                if id ~= 0 and type(ItemDB[id]) ~= "table" then return nil end
+            end
+            if solidAt(x, y) then
+                return false, "Karakter masih bertabrakan dengan block. Pindah ke ruang kosong lalu matikan lagi."
+            end
         end
     end
-    return false
+    if math.abs(s.vx or 0) > 0.1 or math.abs(s.vy or 0) > 0.1 then
+        return false, "Lepas tombol gerak dan tunggu karakter berhenti sebelum mematikan Fly."
+    end
+    return true
 end
 
 -- Tile berbahaya (lava, duri, laser)
