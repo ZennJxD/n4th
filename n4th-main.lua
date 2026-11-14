@@ -850,6 +850,8 @@ local State = {
     SeedKeep = 0,                 -- seeds to keep
     Dropped = 0,
     DropPause = false,            -- Auto Farm temporarily paused (going to drop)
+    DropYield = false,            -- AutoDrop requested farm cycle to finish breaking placed blocks first
+    DropYieldWait = false,        -- hold farmLoop cleanly until AutoDrop takes over
 }
 
 local Misc = {
@@ -2999,6 +3001,11 @@ local function farmLoop(runId)
             task.wait(0.2)
             continue
         end
+        if State.DropYield then
+            State.DropYield = false
+            while currentRun() and State.DropYieldWait do task.wait(0.05) end
+            continue
+        end
         local doPlace = farmMode() ~= "Break only"
         local doBreak = farmMode() ~= "Place only"
 
@@ -3016,12 +3023,12 @@ local function farmLoop(runId)
         local acted, outOfBlock = false, false
 
         -- 0) Collect drops on all grid tiles via body touch (single pass), then return to position
-        if (State.AutoCollect or State.Override) and not State.DropPause then
+        if (State.AutoCollect or State.Override) and not State.DropPause and not State.DropYield then
             Drops.waitSpawn(tiles) -- break drops just arrived from server: wait for them to spawn
             if not currentRun() then break end
             if State.CollectMode == "Remote" then
                 for _, t in ipairs(tiles) do
-                    if not currentRun() then break end
+                    if not currentRun() or State.DropYield then break end
                     waitTileDrops(t, 0.4)
                 end
             elseif Drops.touchAll then
@@ -3030,10 +3037,10 @@ local function farmLoop(runId)
         end
         if not currentRun() then break end
 
-        -- 1) Place all empty tiles
-        if doPlace then
+        -- 1) Place all empty tiles (stop placing new blocks if Auto Drop is waiting to depart)
+        if doPlace and not State.DropYield then
             for _, t in ipairs(tiles) do
-                if not currentRun() or State.DropPause then break end
+                if not currentRun() or State.DropPause or State.DropYield then break end
                 local r = tryPlace(t.x, t.y)
                 if r == "empty" then
                     outOfBlock = true
@@ -3108,6 +3115,11 @@ local function farmLoop(runId)
         end
 
         if not currentRun() then break end
+        if State.DropYield then
+            State.DropYield = false
+            while currentRun() and State.DropYieldWait do task.wait(0.05) end
+            continue
+        end
         if State.DropPause then continue end
 
         if not acted then
@@ -3139,6 +3151,8 @@ end
 
 stopFarm = function(reason)
     State.Running = false
+    State.DropYield = false
+    State.DropYieldWait = false
     setRunningVisual()
     if reason and not State.Quiet then
         notify("Auto Farm stopped", reason, 4)
@@ -6053,11 +6067,22 @@ local function walkTo(tx, ty, maxSec, live, makeRoute)
         end
         local path
         if not route or route.point(tx, ty) then path = astar(sx, sy, goal, tx, ty, 0.5, false, route) end
-        if not path or (route and #path == 0) then
+        if not path then
             if not route and not next(badEdges) then break end
             misses += 1
             if misses >= 3 then break end
             -- Retry once position / drops change, ignoring prior farming failure history.
+            table.clear(badEdges)
+        elseif #path == 0 then
+            if not route or (floor(s.x) == tx and route.safe(s, true)) then
+                ok = true
+                break
+            elseif route.point(tx, ty) and execWalk(tx, ty) then
+                ok = true
+                break
+            end
+            misses += 1
+            if misses >= 3 then break end
             table.clear(badEdges)
         elseif #path > 0 then
             misses = 0
@@ -6381,14 +6406,22 @@ local function dropItems(id, n, live, allowFlip)
     local f = hud and rawget(hud, "onDrop")
     if type(f) ~= "function" then return 0, "game drop function not found" end
     local left, flipped = n, false
+    local ping = 0.1
+    pcall(function() ping = LocalPlayer:GetNetworkPing() end)
+    local waitLimit = math.clamp(0.85 + 2.5 * ping, 0.9, 2.5)
     while left > 0 and live() do
         local before = invCount(id)
         local amount = math.min(left, 200, before)
         if amount <= 0 then return n - left, "item ran out" end
         local ok, err = pcall(f, id, amount)
         if not ok then return n - left, tostring(err) end
-        task.wait(0.7) -- game rejects drops sent too fast (0.3s)
+        task.wait(0.35) -- game rejects drops sent too fast (0.3s)
         local got = before - invCount(id)
+        local deadline = os.clock() + waitLimit
+        while got <= 0 and live() and os.clock() < deadline do
+            task.wait(0.1)
+            got = before - invCount(id)
+        end
         if got > 0 then
             left -= got
         elseif not flipped and allowFlip ~= false then
@@ -6674,7 +6707,7 @@ do
                 end
             end
         end
-        local radius = 0.85 -- game touch pickup radius is ~0.6 tile, plus stopping margin
+        local radius = 0.68 -- game touch pickup radius is ~0.6 tile, keep safe margin without blocking adjacent tiles
         local function inside(x, y, item) return abs(x - item.x) < radius and abs(y - item.y) < radius end
         for _, item in ipairs(obstacles) do
             item.escaping = current and inside(current.x, current.y - 0.475, item) or false
@@ -6752,6 +6785,10 @@ do
             AutoDrop.Status = "Waiting for the character to return to a stable farm tile"
             return
         end
+        if not Session.bindMovement(true) then
+            AutoDrop.Status = "Game movement controls not found"
+            return
+        end
         local hx, hy = startNode(state)
         if not openAt(hx, hy) or not realSupport(hx, hy) then
             AutoDrop.Status = "Waiting for the character to return to a stable farm tile"
@@ -6774,15 +6811,38 @@ do
         local returned, failure, departed = false, nil, false
         local droppedZones, freedItems = {}, {}
         local ok, err = pcall(function()
+            if State.Running and not State.Override and farmMode() ~= "Place only" then
+                AutoDrop.Status = "Finishing current farm cycle before drop"
+                State.DropYield, State.DropYieldWait = true, true
+                local yieldUntil = os.clock() + 4
+                while live() and State.Running and State.DropYield and os.clock() < yieldUntil do
+                    task.wait(0.05)
+                end
+            end
             Guard.stopAll(true)
+            State.DropYield, State.DropYieldWait = false, false
+            local freshState = playerState()
+            if freshState and freshState.grounded and not freshState.dead then
+                local fx, fy = startNode(freshState)
+                if openAt(fx, fy) and realSupport(fx, fy) then hx, hy = fx, fy end
+            end
             AutoDrop.Status = "Pausing farming to drop"
-            task.wait(1.2)
+            task.wait(0.6)
             if not live() then return end
             AutoDrop.Status = "Walking to the drop point"
-            departed = true
-            if not walkTo(x, y, 60, live, AutoDrop.route) or not live() then
+            local walkOk = walkTo(x, y, 60, live, AutoDrop.route)
+            local afterWalk = playerState()
+            if walkOk or (afterWalk and (floor(afterWalk.x) ~= hx or floor(afterWalk.y - 0.475) ~= hy)) then
+                departed = true
+            end
+            if not walkOk or not live() then
                 if live() then failure = "The drop tile is unreachable" end
                 return
+            end
+            local cur = playerState()
+            if cur and math.abs(cur.x - (x + 0.5)) > 0.22 then
+                AutoInput.active = true
+                execWalk(x, y, 0.15)
             end
             local function returnPath(direction)
                 local s = playerState()
@@ -6800,14 +6860,29 @@ do
                 end
                 facing = -facing
             end
-            -- Face direction at target tile, then recheck position and path.
+            -- Face direction cleanly at target tile, releasing immediately when facing flips.
             AutoInput.active = true
-            for _ = 1, 3 do
-                if not live() or not atPoint(x, y) or atPoint(x, y, facing) then break end
+            for _ = 1, 4 do
+                if not live() or atPoint(x, y, facing) then break end
+                local sNow = playerState()
+                if not sNow or floor(sNow.x) ~= x or floor(sNow.y - 0.475) ~= y then
+                    execWalk(x, y, 0.15)
+                    if atPoint(x, y, facing) then break end
+                end
                 AutoInput.left, AutoInput.right = facing < 0, facing > 0
-                task.wait(0.045)
-                releaseInput()
-                task.wait(0.12)
+                local turnUntil = os.clock() + 0.35
+                while live() and os.clock() < turnUntil do
+                    task.wait()
+                    local st = playerState()
+                    if not st or ((st.facing or 1) < 0 and -1 or 1) == facing then break end
+                    if floor(st.x) ~= x then break end
+                end
+                AutoInput.left, AutoInput.right = false, false
+                task.wait(0.08)
+            end
+            local sFinal = playerState()
+            if live() and sFinal and (floor(sFinal.x) ~= x or floor(sFinal.y - 0.475) ~= y) then
+                execWalk(x, y, 0.15)
             end
             local function canDrop() return live() and atPoint(x, y, facing) end
             if not canDrop() then failure = "The character has not reached the drop tile or is facing the wrong way" return end
@@ -6837,12 +6912,17 @@ do
                 end
             end
         end)
+        State.DropYield, State.DropYieldWait = false, false
         if not ok then failure = tostring(err) end
         -- Return trip still finishes if toggle is switched off mid-way.
         if sameWorld() then
             AutoDrop.Status = "Finding a safe path back"
             local backOk, result = pcall(function()
                 if not departed and atPoint(hx, hy) then return true end
+                if not departed then
+                    local stNow = playerState()
+                    if stNow and floor(stNow.x) == hx and floor(stNow.y - 0.475) == hy then return true end
+                end
                 return walkTo(hx, hy, 60, sameWorld, AutoDrop.route)
             end)
             returned = backOk and result == true
@@ -6866,6 +6946,8 @@ do
         for _, zone in ipairs(droppedZones) do zone.before = nil end
         AutoDrop.Busy, AutoDrop.Saved = false, nil
         if returned and sameWorld() then
+            local curX, curY = Auto.here()
+            if curX then saved.tx, saved.ty = curX, curY end
             local resumed, resumeError = pcall(Guard.resumeActivities, saved, sameWorld)
             if not resumed then failure = tostring(resumeError) end
         elseif sameWorld() then
@@ -12811,6 +12893,8 @@ do (function() -- isolated function: internal locals do not count toward the 200
         local w = Refs.World
         if not w or name == "" then return false, "unknown world name" end
         local oldFg = rawget(w, "fg")
+        local oldName = worldName()
+        local seenDifferent = oldName:upper() ~= name:upper()
         local m = Refs.Menu
         if m and type(rawget(m, "enter")) == "function" then
             local ok, res, msg, hopping = pcall(m.enter, name)
@@ -12826,11 +12910,16 @@ do (function() -- isolated function: internal locals do not count toward the 200
         else
             return false, "enter world function not found"
         end
-        -- succeeds once world data switches to the new world
+        -- succeeds once world data switches to the new world (table swap or in-place reload)
         local t0 = os.clock()
-        while alive() and os.clock() - t0 < 8 do
+        while alive() and os.clock() - t0 < 10 do
             if WorldFinder.Busy and WorldFinder.Teleporting then return false, "Server transfer", true end
-            if rawget(w, "fg") ~= oldFg then return true end
+            local curW = Refs.World
+            local curName = worldName()
+            if curName == "" or curName:upper() ~= name:upper() then seenDifferent = true end
+            if curW and (rawget(curW, "fg") ~= oldFg or (seenDifferent and curName:upper() == name:upper() and Auto.here() ~= nil)) then
+                return true
+            end
             task.wait(0.25)
         end
         return false, "world full / locked / failed"
@@ -13104,6 +13193,7 @@ do (function() -- isolated function: internal locals do not count toward the 200
     Guard.anyRunning = anyRunning
     function Guard.afterEnter()
         Auto.resetReach()
+        pcall(Session.bindMovement, true)
         pcall(findDropRefs)
         pcall(Auto.findTreeRefs)
         table.clear(DropFailUntil)
@@ -15047,8 +15137,53 @@ do (function()
     local HttpService = game:GetService("HttpService")
     local TeleportService = game:GetService("TeleportService")
     local GuiService = game:GetService("GuiService")
+    local CoreGui = game:GetService("CoreGui")
     local canFile = type(writefile) == "function" and type(readfile) == "function" and type(isfile) == "function"
     local PENDING = "n4thOpus/rejoin_" .. tostring(LocalPlayer.UserId) .. ".json"
+    local TELEPORT_KEY = "n4th.rejoin.v1"
+
+    local function ensureOpusFolder()
+        if type(isfolder) == "function" and type(makefolder) == "function" then
+            local okF, has = pcall(isfolder, "n4thOpus")
+            if okF and not has then pcall(makefolder, "n4thOpus") end
+        end
+    end
+
+    local function queueScript()
+        local q = queue_on_teleport or queueonteleport or (syn and syn.queue_on_teleport) or (fluxus and fluxus.queue_on_teleport)
+        local url = tostring(Rejoin.ScriptUrl or "")
+        if type(q) == "function" and string.sub(url, 1, 8) == "https://" then
+            return pcall(q, ("if not game:IsLoaded() then game.Loaded:Wait() end; loadstring(game:HttpGet(%q))()"):format(url))
+        end
+        return false
+    end
+
+    local function savePending(world, saved)
+        local target = (saved and saved.world ~= "" and saved.world) or world or ""
+        if target == "" then return false end
+        local data = {
+            world = target,
+            farm = saved and saved.farm or false,
+            clear = saved and saved.clear or false,
+            farmer = saved and saved.farmer or false,
+            clearTarget = saved and saved.clearTarget or nil,
+            spam = saved and saved.spam or false,
+            splice = saved and saved.splice or false,
+            factory = saved and (saved.factory or saved.pabrik) or false,
+            build = saved and saved.build or false,
+            tx = saved and saved.tx or nil,
+            ty = saved and saved.ty or nil,
+            user = LocalPlayer.UserId,
+            at = os.time(),
+        }
+        local wrote = false
+        if canFile then
+            ensureOpusFolder()
+            wrote = pcall(function() writefile(PENDING, HttpService:JSONEncode(data)) end)
+        end
+        local tpOk = pcall(TeleportService.SetTeleportSetting, TeleportService, TELEPORT_KEY, data)
+        return wrote or tpOk
+    end
 
     -- snapshot activity while still running
     task.spawn(function()
@@ -15068,43 +15203,87 @@ do (function()
         end
     end)
 
+    local function hasSavedActivity(saved)
+        return saved and (saved.farm or saved.clear or saved.farmer or saved.spam
+            or saved.splice or saved.factory or saved.pabrik or saved.build or saved.vend)
+    end
+
     local function resume(saved, reason)
         Guard.afterEnter()
         Rejoin.Count += 1
-        Rejoin.Status = "Re-entered successfully, resuming activity"
-        notify("Auto Reconnect", reason .. ": resuming activity", 4)
-        Hook.send("rejoin", reason .. " to " .. tostring(saved.world) .. ", activity resumed")
-        Guard.resumeSaved(saved)
+        if hasSavedActivity(saved) then
+            Rejoin.Status = "Re-entered successfully, resuming activity"
+            notify("Auto Reconnect", reason .. ": resuming activity", 4)
+            Hook.send("rejoin", reason .. " to " .. tostring(saved.world) .. ", activity resumed")
+            Guard.resumeSaved(saved)
+        else
+            Rejoin.Status = "Re-entered " .. tostring(saved and saved.world or "") .. " successfully"
+            notify("Auto Reconnect", reason .. ": returned to " .. tostring(saved and saved.world or ""), 4)
+            Hook.send("rejoin", reason .. " to " .. tostring(saved and saved.world or ""))
+        end
+    end
+
+    function Rejoin.targetWorld()
+        local t = tostring(Rejoin.Target or ""):upper():gsub("[^A-Z0-9]", "")
+        if t ~= "" then return t end
+        return Rejoin.LastWorld or ""
+    end
+
+    local function enterAndResume(world, saved, reason)
+        for try = 1, 3 do
+            if not alive() then return false end
+            local ok, err, hopping = Guard.enterWorld(world)
+            if hopping == true then
+                savePending(world, saved)
+                local queued = queueScript()
+                Rejoin.Status = "Server transfer to " .. world .. "..." .. (queued and "" or " (script not queued)")
+                Hook.send("rejoin", reason .. " transfer to " .. world)
+                return true
+            end
+            if ok then
+                task.wait(1.5)
+                if saved and saved.world == world and hasSavedActivity(saved) then
+                    resume(saved, reason)
+                else
+                    Guard.afterEnter()
+                    Rejoin.Count += 1
+                    Rejoin.Status = reason .. " to " .. world .. " succeeded"
+                    Hook.send("rejoin", reason .. " to " .. world)
+                end
+                return true
+            end
+            Rejoin.Status = ("Failed to enter %s (%d/3): %s"):format(world, try, tostring(err))
+            task.wait(8)
+        end
+        notify("Auto Rejoin", "Failed to enter " .. world, 5)
+        Hook.send("rejoin", "Failed to enter " .. world)
+        return false
     end
 
     -- ===== kicked from world =====
     local function onWorldClosed(msg)
-        if not (Rejoin.On and Rejoin.World) or Rejoin.Busy or Factory.Traveling or WorldFinder.Busy then return end
+        if not (Rejoin.On and Rejoin.World) or Rejoin.Busy or Rejoin.Leaving or Factory.Traveling or WorldFinder.Busy then return end
         if Guard.Mode == "away" or Guard.Mode == "out" then return end -- Guard initiated the exit
         local saved = Rejoin.Last
-        if not saved or saved.world == "" or os.clock() - Rejoin.LastAt > 10 then return end
+        if saved and (saved.world == "" or os.clock() - Rejoin.LastAt > 60) then saved = nil end
+        local target = (saved and saved.world ~= "" and saved.world) or Rejoin.targetWorld()
+        if target == "" then target = Guard.worldName() end
+        if target == "" then return end
         Rejoin.Busy = true
         task.spawn(function()
-            Guard.stopAll()
+            local worldBefore = Guard.worldName()
+            if Guard.anyRunning() then Guard.stopAll() end
             local text = tostring(msg or ""):gsub("`.", "")
-            Rejoin.Status = "Kicked from " .. saved.world .. ". Re-entering..."
-            Hook.send("rejoin", "Kicked from world " .. saved.world .. (text ~= "" and (" (" .. text .. ")") or ""))
-            task.wait(Rejoin.DelaySec + 1.5) -- wait for door animation to finish
-            for try = 1, 3 do
-                if not (alive() and Rejoin.On) then break end
-                local ok, err = Guard.enterWorld(saved.world)
-                if ok then
-                    task.wait(1.5)
-                    resume(saved, "Re-entering")
-                    Rejoin.Busy = false
-                    return
-                end
-                Rejoin.Status = ("Failed to enter (%d/3): %s"):format(try, tostring(err))
-                task.wait(10)
+            Rejoin.Status = "Kicked from " .. target .. ". Re-entering..."
+            Hook.send("rejoin", "Kicked from world " .. target .. (text ~= "" and (" (" .. text .. ")") or ""))
+            task.wait(Rejoin.DelaySec + 1.5) -- wait for door/kick transition to finish
+            if alive() and Rejoin.On and Guard.worldName() ~= "" and Guard.worldName() == worldBefore then
+                pcall(Guard.leaveWorld)
+                task.wait(1.5)
             end
-            Rejoin.Status = "Failed to re-enter " .. saved.world
-            notify("Auto Reconnect", Rejoin.Status, 5)
-            Hook.send("rejoin", Rejoin.Status)
+            if alive() and Rejoin.On then
+                enterAndResume(target, saved, "Re-entering")
+            end
             Rejoin.Busy = false
         end)
     end
@@ -15129,41 +15308,6 @@ do (function()
                 if alive() then onWorldClosed(msg) end
             end))
         end
-    end
-
-    -- ===== manual rejoin & keep returning to world =====
-    -- How it works:
-    --   Manual rejoin : snapshot activity -> leave world -> re-enter -> resume activity.
-    --   Always return : check every 2s; if outside a world (world select screen)
-    --                   longer than delay -> enter target world -> resume activity.
-    function Rejoin.targetWorld()
-        local t = tostring(Rejoin.Target or ""):upper():gsub("[^A-Z0-9]", "")
-        if t ~= "" then return t end
-        return Rejoin.LastWorld or ""
-    end
-
-    local function enterAndResume(world, saved, reason)
-        for try = 1, 3 do
-            if not alive() then return false end
-            local ok, err = Guard.enterWorld(world)
-            if ok then
-                task.wait(1.5)
-                if saved and saved.world == world then
-                    resume(saved, reason)
-                else
-                    Guard.afterEnter()
-                    Rejoin.Count += 1
-                    Rejoin.Status = reason .. " to " .. world .. " succeeded"
-                    Hook.send("rejoin", reason .. " to " .. world)
-                end
-                return true
-            end
-            Rejoin.Status = ("Failed to enter %s (%d/3): %s"):format(world, try, tostring(err))
-            task.wait(8)
-        end
-        notify("Auto Rejoin", "Failed to enter " .. world, 5)
-        Hook.send("rejoin", "Failed to enter " .. world)
-        return false
     end
 
     function Rejoin.now()
@@ -15224,30 +15368,16 @@ do (function()
     end)
 
     -- ===== disconnected from server =====
-    local function queueScript()
-        local q = queue_on_teleport or queueonteleport or (syn and syn.queue_on_teleport) or (fluxus and fluxus.queue_on_teleport)
-        local url = tostring(Rejoin.ScriptUrl or "")
-        if type(q) == "function" and string.sub(url, 1, 8) == "https://" then
-            return pcall(q, ("loadstring(game:HttpGet(%q))()"):format(url))
-        end
-        return false
-    end
-
     local function onDisconnect(msg)
         if not (Rejoin.On and Rejoin.Server) or Rejoin.Leaving then return end
         Rejoin.Leaving = true
         local finderActive = WorldFinder.Busy and WorldFinder.Running and not WorldFinder.Cancelled
         local saved = not finderActive and (Rejoin.Last or (Guard.anyRunning() and Guard.snapshot())) or nil
         local world = finderActive and WorldFinder.Queue and WorldFinder.Queue[WorldFinder.Index]
-            or (saved and saved.world or Guard.worldName())
-        if canFile and saved then
-            local data = {
-                world = saved.world, farm = saved.farm, clear = saved.clear, farmer = saved.farmer,
-                clearTarget = saved.clearTarget,
-                spam = saved.spam, splice = saved.splice, factory = saved.factory or saved.pabrik, build = saved.build,
-                tx = saved.tx, ty = saved.ty, at = os.time(),
-            }
-            pcall(function() writefile(PENDING, HttpService:JSONEncode(data)) end)
+            or (saved and saved.world or Rejoin.targetWorld())
+        if world == "" then world = Guard.worldName() end
+        if not finderActive and (saved or world ~= "") then
+            savePending(world, saved)
         end
         local queued
         if finderActive and WorldFinder.armTeleport then queued = WorldFinder.armTeleport()
@@ -15257,9 +15387,13 @@ do (function()
         task.spawn(function()
             task.wait(Rejoin.DelaySec)
             while alive() do
-                pcall(function()
-                    TeleportService:Teleport(game.PlaceId, LocalPlayer, (world ~= "") and { world = world } or nil)
+                -- Roblox blocks client-supplied teleportData on Teleport(); rely on PENDING / SetTeleportSetting instead.
+                local ok = pcall(function()
+                    TeleportService:Teleport(game.PlaceId, LocalPlayer)
                 end)
+                if not ok then
+                    pcall(function() TeleportService:Teleport(game.PlaceId) end)
+                end
                 task.wait(15) -- still not teleported: retry
             end
         end)
@@ -15269,34 +15403,65 @@ do (function()
         table.insert(Connections, GuiService.ErrorMessageChanged:Connect(function(msg)
             if alive() and type(msg) == "string" and msg ~= "" then onDisconnect(msg) end
         end))
+        local okE, existingErr = pcall(function() return GuiService:GetErrorMessage() end)
+        if okE and type(existingErr) == "string" and existingErr ~= "" then
+            task.defer(onDisconnect, existingErr)
+        end
+    end)
+
+    pcall(function()
+        local promptGui = CoreGui:FindFirstChild("RobloxPromptGui")
+        local overlay = promptGui and promptGui:FindFirstChild("promptOverlay")
+        if overlay then
+            local function checkPrompt(child)
+                if alive() and child and child.Name == "ErrorPrompt" then
+                    local okMsg, errMsg = pcall(function() return GuiService:GetErrorMessage() end)
+                    onDisconnect((okMsg and errMsg and errMsg ~= "") and errMsg or "Connection error prompt")
+                end
+            end
+            table.insert(Connections, overlay.ChildAdded:Connect(checkPrompt))
+            local existingPrompt = overlay:FindFirstChild("ErrorPrompt")
+            if existingPrompt then task.defer(checkPrompt, existingPrompt) end
+        end
     end)
 
     -- ===== post-execute: resume from rejoin snapshot =====
     function Rejoin.startup(reconnectFn)
-        if not canFile then return end
-        local okE, has = pcall(isfile, PENDING)
-        if not okE or not has then return end
-        local okR, raw = pcall(readfile, PENDING)
-        if type(delfile) == "function" then pcall(delfile, PENDING) end
-        if not okR or type(raw) ~= "string" then return end
-        local okD, saved = pcall(HttpService.JSONDecode, HttpService, raw)
-        if not okD or type(saved) ~= "table" or type(saved.world) ~= "string" or saved.world == "" then return end
+        local saved = nil
+        if canFile then
+            local okE, has = pcall(isfile, PENDING)
+            if okE and has then
+                local okR, raw = pcall(readfile, PENDING)
+                if type(delfile) == "function" then pcall(delfile, PENDING) end
+                if okR and type(raw) == "string" then
+                    local okD, decoded = pcall(HttpService.JSONDecode, HttpService, raw)
+                    if okD and type(decoded) == "table" then saved = decoded end
+                end
+            end
+        end
+        if not saved then
+            local okT, tpData = pcall(TeleportService.GetTeleportSetting, TeleportService, TELEPORT_KEY)
+            if okT and type(tpData) == "table" then saved = tpData end
+        end
+        pcall(TeleportService.SetTeleportSetting, TeleportService, TELEPORT_KEY, false)
+        if type(saved) ~= "table" or type(saved.world) ~= "string" or saved.world == "" then return end
+        if saved.user and saved.user ~= LocalPlayer.UserId then return end
         if os.time() - (tonumber(saved.at) or 0) > 15 * 60 then return end -- expired
         Rejoin.Busy = true
         Rejoin.Status = "Rejoin: waiting to enter " .. saved.world
-        -- wait for game to auto-enter world (from teleport data); otherwise enter manually
         local t0 = os.clock()
-        local tried = false
+        local lastTryAt, tries = -10, 0
         while alive() and os.clock() - t0 < 60 do
-            if Refs.World and Guard.worldName() == saved.world and Auto.here() then break end
+            if Refs.World and Guard.worldName():upper() == saved.world:upper() and Auto.here() then break end
             if not Refs.World then pcall(reconnectFn) end
-            if Refs.World and not tried and os.clock() - t0 > 12 then
-                tried = true
+            if Refs.World and tries < 3 and os.clock() - lastTryAt >= 10 then
+                lastTryAt = os.clock()
+                tries += 1
                 Guard.enterWorld(saved.world)
             end
             task.wait(2)
         end
-        if alive() and Guard.worldName() == saved.world then
+        if alive() and Guard.worldName():upper() == saved.world:upper() then
             pcall(reconnectFn)
             task.wait(1)
             resume(saved, "Rejoin server")
@@ -16183,7 +16348,10 @@ do (function()
             Title = "Auto Reconnect",
             Desc = "Rejoin & resume activity if kicked out",
             Value = Rejoin.On,
-            Callback = function(on) Rejoin.On = on end,
+            Callback = function(on)
+                Rejoin.On = on
+                if Session.Ready and Config.AutoSave then Config.save(true) end
+            end,
         })
     end)
 
@@ -16192,7 +16360,10 @@ do (function()
             Title = "Kicked from world",
             Desc = "World closed / kicked: rejoin the same world",
             Value = Rejoin.World,
-            Callback = function(on) Rejoin.World = on end,
+            Callback = function(on)
+                Rejoin.World = on
+                if Session.Ready and Config.AutoSave then Config.save(true) end
+            end,
         })
     end)
 
@@ -16201,7 +16372,10 @@ do (function()
             Title = "Always return to world",
             Desc = "If outside a world (world select screen), rejoin automatically",
             Value = Rejoin.Keep,
-            Callback = function(on) Rejoin.Keep = on end,
+            Callback = function(on)
+                Rejoin.Keep = on
+                if Session.Ready and Config.AutoSave then Config.save(true) end
+            end,
         })
     end)
 
@@ -16211,7 +16385,10 @@ do (function()
             Desc = "Empty = the last world you entered",
             Value = Rejoin.Target,
             Placeholder = "WORLDNAME",
-            Callback = function(text) Rejoin.Target = tostring(text or "") end,
+            Callback = function(text)
+                Rejoin.Target = tostring(text or "")
+                if Session.Ready and Config.AutoSave then Config.save(true) end
+            end,
         })
     end)
 
@@ -16228,7 +16405,10 @@ do (function()
             Title = "Disconnected from server",
             Desc = "Teleport back to the game and enter the last world",
             Value = Rejoin.Server,
-            Callback = function(on) Rejoin.Server = on end,
+            Callback = function(on)
+                Rejoin.Server = on
+                if Session.Ready and Config.AutoSave then Config.save(true) end
+            end,
         })
     end)
 
@@ -16246,6 +16426,7 @@ do (function()
             Placeholder = "https://...",
             Callback = function(text)
                 Rejoin.ScriptUrl = tostring(text or ""):gsub("^%s+", ""):gsub("%s+$", "")
+                if Session.Ready and Config.AutoSave then Config.save(true) end
             end,
         })
     end)
