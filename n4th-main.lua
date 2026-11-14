@@ -9,7 +9,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = legacy versi
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-14-noclip-guard-1"
+Session.Build = "2026-11-14-noclip-guard-2"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -13176,6 +13176,31 @@ end)
 do (function() -- isolated function: internal locals do not count toward the 200-local limit
     local function strip(s) return (tostring(s or ""):gsub("`.", "")) end
 
+    local groupRoleCache = {}
+    local function probeGroupRole(plr)
+        if not plr then return end
+        local uid = plr.UserId
+        if groupRoleCache[uid] ~= nil then return end
+        groupRoleCache[uid] = false
+        if game.CreatorType ~= Enum.CreatorType.Group or game.CreatorId <= 0 then return end
+        task.spawn(function()
+            local ok, role = pcall(function() return plr:GetRoleInGroup(game.CreatorId) end)
+            if ok and type(role) == "string" then
+                local low = role:lower()
+                if low:find("owner", 1, true) or low:find("creator", 1, true)
+                    or low:find("founder", 1, true) or low:find("developer", 1, true)
+                    or low == "dev" then
+                    groupRoleCache[uid] = "Developer"
+                elseif low:find("moderator", 1, true) or low == "mod" or low:find("mod ", 1, true)
+                    or low:find(" mod", 1, true) or low:find("trial", 1, true) then
+                    groupRoleCache[uid] = "Moderator"
+                elseif low:find("admin", 1, true) or low:find("staff", 1, true) then
+                    groupRoleCache[uid] = "Staff"
+                end
+            end
+        end)
+    end
+
     local function roleOf(uid)
         if RolesOk and type(RolesModule) == "table" then
             local okD, dev = pcall(RolesModule.isDeveloper, uid)
@@ -13193,7 +13218,12 @@ do (function() -- isolated function: internal locals do not count toward the 200
             local low = tag:lower()
             if low == "developer" then return "Developer" end
             if low == "moderator" then return "Moderator" end
-            if low == "staff" or low == "admin" then return "Staff" end
+            return "Staff"
+        end
+        if plr then
+            probeGroupRole(plr)
+            local gr = groupRoleCache[uid]
+            if type(gr) == "string" then return gr end
         end
         return nil
     end
@@ -13472,8 +13502,15 @@ do (function() -- isolated function: internal locals do not count toward the 200
 
     -- Staff online across the server (not just this world)
     local lastScan, lastRefCheck, staffText = -10, -10, "-"
+    table.insert(Connections, Players.PlayerAdded:Connect(function(plr)
+        probeGroupRole(plr)
+        lastScan = -10
+    end))
+    table.insert(Connections, Players.PlayerRemoving:Connect(function()
+        lastScan = -10
+    end))
     local function serverStaff()
-        if os.clock() - lastScan < 3 then return staffText end
+        if os.clock() - lastScan < 1 then return staffText end
         lastScan = os.clock()
         local t = {}
         for _, plr in ipairs(Players:GetPlayers()) do
