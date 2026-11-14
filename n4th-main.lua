@@ -9,7 +9,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = legacy versi
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-14-path-glide-1"
+Session.Build = "2026-11-14-path-glide-2"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -2846,6 +2846,7 @@ local function setPathGlide(on)
     if on then
         Session.PathGlideArmedAt = os.clock()
         pcall(Session.bindMovement, true)
+        notify("Path Glide", "Click or tap any open space to glide there", 3)
     elseif Session.stopPathGlide then
         Session.stopPathGlide()
     end
@@ -3665,12 +3666,14 @@ do (function()
     end
 
     local function isGuiBlocked(x, y)
+        local camera = workspace.CurrentCamera
+        local view = camera and camera.ViewportSize or Vector2.new(1280, 720)
         local okCg, coreGui = pcall(game.GetService, game, "CoreGui")
         if okCg and coreGui then
             local inset = guiSvc:GetGuiInset()
             local cx, cy = x + inset.X, y + inset.Y
             for _, sg in ipairs(coreGui:GetChildren()) do
-                if sg:IsA("ScreenGui") and sg.Enabled then
+                if sg:IsA("ScreenGui") and sg.Enabled and (sg.Name:sub(1, 4) == "n4th" or sg.Name == "N4TH_V2") then
                     local px, py = sg.IgnoreGuiInset and cx or x, sg.IgnoreGuiInset and cy or y
                     for _, ch in ipairs(sg:GetChildren()) do
                         if ch:IsA("GuiObject") and ch.Visible then
@@ -3689,11 +3692,14 @@ do (function()
         local tiles = cam and cam:FindFirstChild("Tiles")
         for _, obj in ipairs(PlayerGui:GetGuiObjectsAtPosition(x, y)) do
             local sg = obj:FindFirstAncestorWhichIsA("ScreenGui")
-            if sg and sg.Name:sub(1, 4) == "n4th" then return true end
+            if sg and (sg.Name:sub(1, 4) == "n4th" or sg.Name == "N4TH_V2") then return true end
             if obj:FindFirstAncestor("TouchGui") then return true end
             if (obj:IsA("GuiButton") or obj:IsA("TextBox") or obj:IsA("ScrollingFrame"))
                 and obj ~= gg and obj ~= worldGui and obj ~= cam and obj ~= tiles then
-                return true
+                local as = obj.AbsoluteSize
+                if not (as.X >= view.X * 0.65 and as.Y >= view.Y * 0.65) then
+                    return true
+                end
             end
         end
         return false
@@ -3711,6 +3717,18 @@ do (function()
         return floor(rel.X / v.ts) + State.CalibX, floor(rel.Y / v.ts) + State.CalibY
     end
 
+    local lastTapAt = 0
+    local function handleWorldClick(x, y)
+        local now = os.clock()
+        if now - lastTapAt < 0.12 then return end
+        if isGuiBlocked(x, y) then return end
+        local tx, ty = screenPosToTile(x, y)
+        if tx and ty then
+            lastTapAt = now
+            startGlideTo(tx, ty)
+        end
+    end
+
     local touchStart = nil
     table.insert(Connections, UserInputService.InputBegan:Connect(function(input)
         if not alive() or not Misc.PathGlide or AutoInput.active or WorldFinder.Busy then return end
@@ -3721,10 +3739,7 @@ do (function()
             return
         end
         if input.UserInputType == Enum.UserInputType.MouseButton1 then
-            local x, y = input.Position.X, input.Position.Y
-            if isGuiBlocked(x, y) then return end
-            local tx, ty = screenPosToTile(x, y)
-            if tx and ty then startGlideTo(tx, ty) end
+            handleWorldClick(input.Position.X, input.Position.Y)
         elseif input.UserInputType == Enum.UserInputType.Touch then
             local x, y = input.Position.X, input.Position.Y
             if not isGuiBlocked(x, y) then
@@ -3734,17 +3749,23 @@ do (function()
     end))
 
     table.insert(Connections, UserInputService.InputEnded:Connect(function(input)
-        if not touchStart or input ~= touchStart.input then return end
+        if not touchStart then return end
+        if input ~= touchStart.input and input.UserInputType ~= Enum.UserInputType.Touch then return end
         local info = touchStart
         touchStart = nil
         if not alive() or not Misc.PathGlide or AutoInput.active or WorldFinder.Busy then return end
-        if os.clock() - info.at > 0.35 then return end
+        if os.clock() - info.at > 0.65 then return end
         local dx, dy = input.Position.X - info.x, input.Position.Y - info.y
-        if dx * dx + dy * dy > 196 then return end
-        if not isGuiBlocked(input.Position.X, input.Position.Y) then
-            local tx, ty = screenPosToTile(input.Position.X, input.Position.Y)
-            if tx and ty then startGlideTo(tx, ty) end
-        end
+        if dx * dx + dy * dy > 576 then return end
+        handleWorldClick(input.Position.X, input.Position.Y)
+    end))
+
+    table.insert(Connections, UserInputService.TouchTap:Connect(function(positions)
+        if not alive() or not Misc.PathGlide or AutoInput.active or WorldFinder.Busy then return end
+        if os.clock() - (Session.PathGlideArmedAt or 0) < 0.25 then return end
+        if UserInputService:GetFocusedTextBox() then return end
+        local pos = positions and positions[1]
+        if pos then handleWorldClick(pos.X, pos.Y) end
     end))
 
     function Session.preRenderPathGlide()
