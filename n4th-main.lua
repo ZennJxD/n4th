@@ -9,7 +9,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = legacy versi
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-14-native-menu-1"
+Session.Build = "2026-11-14-noclip-guard-1"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -264,7 +264,9 @@ do
                 and type(rawget(rawget(value, "punch"), "send")) == "function"
         end
         if name == "WorldMenu" then return Session.isMovementMenu(value) end
-        if name == "Roles" then return functions(value, { "isDeveloper", "isModerator", "isUndercover" }) end
+        if name == "Roles" then
+            return functions(value, { "isDeveloper", "isModerator", "isStaff", "showsStaff" })
+        end
         if name == "Sfx" then return functions(value, { "play", "playAt", "loop" }) end
         return false
     end
@@ -487,7 +489,7 @@ do
             ItemDB = { 2, 4 }, Inventory = { "new", "add", "remove", "count", "used", "room", "select" },
             Net = { "call", "on", "worldTag", "CALLS", "EVENTS", "punch" },
             WorldMenu = { "isDown", "KEYS" },
-            Roles = { "isDeveloper", "isModerator", "isUndercover" }, Sfx = { "play", "playAt", "loop" },
+            Roles = { "isDeveloper", "isModerator", "isStaff", "showsStaff" }, Sfx = { "play", "playAt", "loop" },
         }
         for _, name in ipairs(structuralNames) do
             if not alive() or os.clock() >= moduleDeadline then break end
@@ -747,6 +749,7 @@ do
             end
             if not NetOk then NetOk, Net = loadModule(Shared, "Net", false) end
             if not MenuModOk then MenuModOk, MenuModule = loadModule(GameGui, "WorldMenu", false) end
+            if not RolesOk then RolesOk, RolesModule = loadModule(Shared, "Roles", false) end
         end)
         Session.ItemScan = false
         if not ok then warn("[n4th] ItemDB scan: " .. tostring(reason)) end
@@ -1673,7 +1676,11 @@ function Anim.consider(v)
         end
         if not Refs.Menu then
             local ok, isMenu = pcall(function()
-                return type(rawget(v, "openBackpack")) == "function" and type(rawget(v, "ui")) == "table"
+                if type(rawget(v, "ui")) ~= "table" then return false end
+                if type(rawget(v, "openPicker")) == "function" and type(rawget(v, "enter")) == "function" then
+                    return true
+                end
+                return type(rawget(v, "openBackpack")) == "function"
             end)
             if ok and isMenu then Refs.Menu = v end
         end
@@ -1756,12 +1763,20 @@ local function findRefs()
     Refs.ScanCount, Refs.ScanError = 0, nil
     Refs.RuntimeReadable = nil
     local filter = filtergc or filter_gc
-    if not Refs.World and type(filter) == "function" then
-        local ok, worlds = pcall(filter, "table", { Keys = { "fg", "bg", "w", "h" } }, false)
-        if ok and type(worlds) == "table" then
-            for _, world in pairs(worlds) do
-                if type(world) == "table" then Anim.consider(world) end
-                if Refs.World then break end
+    if type(filter) == "function" then
+        for _, spec in ipairs({
+            { not Refs.World, { "fg", "bg", "w", "h" }, function() return Refs.World ~= nil end },
+            { not Refs.Menu, { "openPicker", "enter", "ui" }, function() return Refs.Menu ~= nil end },
+            { not Refs.Others, { "list", "where", "playerAt" }, function() return Refs.Others ~= nil end },
+        }) do
+            if spec[1] then
+                local ok, hits = pcall(filter, "table", { Keys = spec[2] }, false)
+                if ok and type(hits) == "table" then
+                    for _, candidate in pairs(hits) do
+                        if type(candidate) == "table" then Anim.consider(candidate) end
+                        if spec[3]() then break end
+                    end
+                end
             end
         end
     end
@@ -2828,8 +2843,11 @@ local function setInfJump(on)
 end
 
 local function setGhost(on, checkCollision)
-    if on then pcall(Session.bindMovement, true) end
-    if checkCollision and on ~= Misc.Ghost then
+    if on then
+        pcall(Session.bindMovement, true)
+        if Session.bindNoclipHooks then pcall(Session.bindNoclipHooks) end
+    end
+    if checkCollision and not on and on ~= Misc.Ghost then
         local checked, clear, reason = pcall(Session.checkGhostPosition)
         if not checked or clear == nil then
             pcall(Anim.quickRefs)
@@ -2839,7 +2857,7 @@ local function setGhost(on, checkCollision)
         local message
         if not checked or clear == nil then
             message = "Position or block data is unavailable. Connect to the game and try again."
-        elseif not on and not clear then
+        elseif not clear then
             message = reason
         end
         if message then
@@ -2958,15 +2976,214 @@ function Session.scheduleMovementRetry()
     end)
 end
 
--- Apply walkspeed & fly before/after game step + fallback noclip assist when solid collision blocks ghost
+-- Apply walkspeed & fly before/after game step + hook game boxHits/platform collision for noclip
 do (function()
     local gn = Session.GhostNoclip
+    local env = type(getfenv) == "function" and getfenv(0) or _G
+    local hookFn = rawget(env, "hookfunction") or rawget(G, "hookfunction") or rawget(_G, "hookfunction")
+        or rawget(env, "replaceclosure") or rawget(G, "replaceclosure") or rawget(_G, "replaceclosure")
+    local setUp = (debug and debug.setupvalue) or rawget(env, "setupvalue") or rawget(G, "setupvalue") or rawget(_G, "setupvalue")
+    local noclipHooked = setmetatable({}, { __mode = "k" })
+    local lastHookScan, stateFnRef, stateUpIdx = -math.huge, nil, nil
 
     local function resetNoclip()
         gn.active = false
         gn.hover = false
         gn.x, gn.y = nil, nil
         gn.preX, gn.preY, gn.preT = nil, nil, nil
+    end
+
+    local function isSolidAtFn(fn)
+        if type(fn) ~= "function" then return false end
+        local comb, vip, ent = false, false, false
+        for _, c in pairs(getconsts(fn)) do
+            if c == "combiner" then comb = true
+            elseif c == "vip" then vip = true
+            elseif c == "entrance" then ent = true end
+            if comb and vip and ent then return true end
+        end
+        return false
+    end
+
+    local function isBoxHitsFn(fn)
+        if type(fn) ~= "function" or noclipHooked[fn] or not isGameFn(fn) then return false end
+        local nC, has95, has3, hasEps = 0, false, false, false
+        for _, c in pairs(getconsts(fn)) do
+            nC += 1
+            if nC > 24 then return false end
+            if type(c) == "number" then
+                local a = math.abs(c)
+                if math.abs(a - 0.95) < 1e-4 then has95 = true
+                elseif math.abs(a - 0.3) < 1e-4 then has3 = true
+                elseif math.abs(a - 0.0001) < 1e-6 then hasEps = true end
+            elseif c == "platform" or c == "culled" then
+                return false
+            end
+        end
+        if not (has95 and has3 and hasEps) then return false end
+        local nUp, hasSolid = 0, false
+        for _, v in pairs(getUpvalues(fn)) do
+            nUp += 1
+            if nUp > 3 then return false end
+            if isSolidAtFn(v) then hasSolid = true end
+        end
+        return hasSolid
+    end
+
+    local function isPlatformFn(fn)
+        if type(fn) ~= "function" or noclipHooked[fn] or not isGameFn(fn) then return false end
+        local nC, hasPlat, has3, hasEps = 0, false, false, false
+        for _, c in pairs(getconsts(fn)) do
+            nC += 1
+            if nC > 30 then return false end
+            if c == "platform" then hasPlat = true
+            elseif type(c) == "number" then
+                local a = math.abs(c)
+                if math.abs(a - 0.3) < 1e-4 then has3 = true
+                elseif math.abs(a - 0.001) < 1e-5 then hasEps = true end
+            end
+        end
+        if not (hasPlat and has3 and hasEps) then return false end
+        local nUp, hasWorld = 0, false
+        for _, v in pairs(getUpvalues(fn)) do
+            nUp += 1
+            if nUp > 8 then return false end
+            if v == Refs.World or (type(v) == "table" and rawget(v, "fg") ~= nil) then hasWorld = true end
+        end
+        return hasWorld
+    end
+
+    local function installNoclipHook(fn, kind)
+        if type(hookFn) ~= "function" or noclipHooked[fn] then return false end
+        local orig
+        local wrapper
+        if kind == "boxHits" then
+            wrapper = function(px, py, ...)
+                if alive() and Misc.Ghost and not AutoInput.active then
+                    local w = Refs.World
+                    if type(w) == "table" and type(w.w) == "number" and type(w.h) == "number"
+                        and type(px) == "number" and type(py) == "number" then
+                        if px - 0.3 < 0 or px + 0.3 > w.w or py > w.h or py - 0.95 < 0 then
+                            return true
+                        end
+                    end
+                    return false
+                end
+                return orig(px, py, ...)
+            end
+        else
+            wrapper = function(a1, a2, ...)
+                if alive() and Misc.Ghost and not AutoInput.active then
+                    return false
+                end
+                return orig(a1, a2, ...)
+            end
+        end
+        local ok, prev = pcall(hookFn, fn, wrapper)
+        if ok and type(prev) == "function" then
+            orig = prev
+            noclipHooked[fn] = true
+            noclipHooked[wrapper] = true
+            if kind == "boxHits" then
+                Session.BoxHitsHooked = true
+            else
+                Session.PlatformHooked = true
+            end
+            return true
+        end
+        return false
+    end
+
+    local function probeNoclipFn(fn, seen, depth)
+        if type(fn) ~= "function" or seen[fn] or noclipHooked[fn] then return end
+        seen[fn] = true
+        if not Session.BoxHitsHooked and isBoxHitsFn(fn) then
+            installNoclipHook(fn, "boxHits")
+        elseif not Session.PlatformHooked and isPlatformFn(fn) then
+            installNoclipHook(fn, "platform")
+        elseif depth < 2 and isGameFn(fn) then
+            for _, u in pairs(getUpvalues(fn)) do
+                if type(u) == "function" then probeNoclipFn(u, seen, depth + 1) end
+                if Session.BoxHitsHooked and Session.PlatformHooked then break end
+            end
+        end
+    end
+
+    function Session.bindNoclipHooks(force)
+        if Session.BoxHitsHooked and Session.PlatformHooked then return true end
+        if type(hookFn) ~= "function" then return false end
+        local seen = {}
+        if type(getconnections) == "function" then
+            local ok, conns = pcall(getconnections, RunService.RenderStepped)
+            if ok and type(conns) == "table" then
+                for _, conn in pairs(conns) do
+                    local fn = Session.connectionFunction(conn)
+                    if type(fn) == "function" then probeNoclipFn(fn, seen, 0) end
+                    if Session.BoxHitsHooked and Session.PlatformHooked then return true end
+                end
+            end
+        end
+        local now = os.clock()
+        if not force and now - lastHookScan < 2 then return Session.BoxHitsHooked == true end
+        lastHookScan = now
+        if type(getgc) == "function" then
+            local ok, objs = pcall(getgc, false)
+            if ok and type(objs) == "table" then
+                for _, v in pairs(objs) do
+                    if type(v) == "function" and not seen[v] and not noclipHooked[v] then
+                        if not Session.BoxHitsHooked and isBoxHitsFn(v) then
+                            installNoclipHook(v, "boxHits")
+                        elseif not Session.PlatformHooked and isPlatformFn(v) then
+                            installNoclipHook(v, "platform")
+                        end
+                        if Session.BoxHitsHooked and Session.PlatformHooked then break end
+                    end
+                end
+            end
+        end
+        return Session.BoxHitsHooked == true
+    end
+
+    local function bindStateUpvals()
+        if type(setUp) ~= "function" or not Refs.State then return nil end
+        if stateFnRef == Refs.State and stateUpIdx then return stateUpIdx end
+        local ok, s = pcall(Refs.State)
+        if not ok or type(s) ~= "table" or type(s.x) ~= "number" or type(s.y) ~= "number" or s.x == s.y then
+            return nil
+        end
+        local ups = getUpvalues(Refs.State)
+        local xIdx, yIdx, gIdx, vxIdx, vyIdx
+        local xCount, yCount, vxCount, vyCount = 0, 0, 0, 0
+        for idx, v in pairs(ups) do
+            if type(idx) == "number" then
+                if v == s.x then xIdx = idx; xCount += 1 end
+                if v == s.y then yIdx = idx; yCount += 1 end
+                if type(s.vx) == "number" and s.vx ~= s.vy and v == s.vx then vxIdx = idx; vxCount += 1 end
+                if type(s.vy) == "number" and s.vx ~= s.vy and v == s.vy then vyIdx = idx; vyCount += 1 end
+                if idx == 8 and type(v) == "boolean" and v == s.grounded then gIdx = 8 end
+            end
+        end
+        if xCount == 1 and yCount == 1 then
+            stateFnRef = Refs.State
+            stateUpIdx = {
+                x = xIdx, y = yIdx, grounded = gIdx,
+                vx = vxCount == 1 and vxIdx or nil,
+                vy = vyCount == 1 and vyIdx or nil,
+            }
+            return stateUpIdx
+        end
+        return nil
+    end
+
+    local function writeStatePos(px, py, clearGround)
+        local idx = bindStateUpvals()
+        if not idx or not Refs.State then return false end
+        if px then pcall(setUp, Refs.State, idx.x, px) end
+        if py then pcall(setUp, Refs.State, idx.y, py) end
+        if clearGround and idx.grounded then pcall(setUp, Refs.State, idx.grounded, false) end
+        if idx.vx then pcall(setUp, Refs.State, idx.vx, 0) end
+        if idx.vy then pcall(setUp, Refs.State, idx.vy, 0) end
+        return true
     end
 
     local function applyWorldProps(w)
@@ -3014,11 +3231,12 @@ do (function()
         if now - gn.lastRefresh < 2 then return end
         local w = Refs.World
         local staleWorld = (not w) or type(rawget(w, "fg")) ~= "table" or type(rawget(w, "w")) ~= "number"
-        if staleWorld or not Refs.State then
+        if staleWorld or not Refs.State or (Misc.Ghost and not Session.BoxHitsHooked) then
             gn.lastRefresh = now
             if staleWorld then Refs.World = nil end
             pcall(Anim.quickRefs)
             pcall(Session.bindMovement, true)
+            if Misc.Ghost then pcall(Session.bindNoclipHooks) end
         end
     end
 
@@ -3030,12 +3248,8 @@ do (function()
             if not Misc.Ghost or AutoInput.active then return end
             local s = readState()
             if not s then return end
-            if (gn.active or gn.hover) and gn.x and gn.y then
-                s.x = gn.x
-                s.y = gn.y
-                s.vx = 0
-                s.vy = 0
-                s.grounded = false
+            if not Session.BoxHitsHooked and (gn.active or gn.hover) and gn.x and gn.y then
+                writeStatePos(gn.x, gn.y, true)
             end
             gn.preX, gn.preY, gn.preT = s.x, s.y, os.clock()
         end)
@@ -3053,7 +3267,7 @@ do (function()
         local w = Refs.World
         if not w then return end
         applyWorldProps(w)
-        if not Misc.Ghost or AutoInput.active then
+        if not Misc.Ghost or AutoInput.active or Session.BoxHitsHooked then
             resetNoclip()
             return
         end
@@ -3077,14 +3291,12 @@ do (function()
             if movedX < minMove and (overlapsNow or aheadX or gn.active) then
                 gn.active = true
                 gn.x = math.clamp((gn.x or preX) + hx * speed * dt, 0.35, w.w - 0.35)
-                s.x = gn.x
-                s.vx = 0
+                writeStatePos(gn.x, nil, false)
             else
                 gn.x = curX
             end
         elseif gn.active then
-            s.x = gn.x or preX
-            s.vx = 0
+            writeStatePos(gn.x or preX, nil, false)
         else
             gn.x = curX
         end
@@ -3098,23 +3310,17 @@ do (function()
                 gn.active = true
                 gn.hover = true
                 gn.y = math.clamp((gn.y or preY) + hy * speed * dt, 0.96, w.h - 0.05)
-                s.y = gn.y
-                s.vy = 0
-                s.grounded = false
+                writeStatePos(nil, gn.y, true)
             else
                 gn.y = curY
                 gn.hover = false
             end
         elseif gn.active then
-            s.y = gn.y or preY
-            s.vy = 0
-            s.grounded = false
+            writeStatePos(nil, gn.y or preY, true)
         elseif gn.hover or ((curY - preY) > 0.015 and not s.grounded) then
             gn.hover = true
             gn.y = gn.y or preY
-            s.y = gn.y
-            s.vy = 0
-            s.grounded = false
+            writeStatePos(nil, gn.y, true)
         else
             gn.y = curY
         end
@@ -12971,11 +13177,24 @@ do (function() -- isolated function: internal locals do not count toward the 200
     local function strip(s) return (tostring(s or ""):gsub("`.", "")) end
 
     local function roleOf(uid)
-        if not (RolesOk and type(RolesModule) == "table") then return nil end
-        local okD, dev = pcall(RolesModule.isDeveloper, uid)
-        if okD and dev then return "Developer" end
-        local okM, mod = pcall(RolesModule.isModerator, uid)
-        if okM and mod then return "Moderator" end
+        if RolesOk and type(RolesModule) == "table" then
+            local okD, dev = pcall(RolesModule.isDeveloper, uid)
+            if okD and dev then return "Developer" end
+            local okM, mod = pcall(RolesModule.isModerator, uid)
+            if okM and mod then return "Moderator" end
+            if type(rawget(RolesModule, "isStaff")) == "function" then
+                local okS, st = pcall(RolesModule.isStaff, uid)
+                if okS and st then return "Staff" end
+            end
+        end
+        local plr = uid and Players:GetPlayerByUserId(uid) or nil
+        local tag = plr and plr:GetAttribute("Tag")
+        if type(tag) == "string" and tag ~= "" then
+            local low = tag:lower()
+            if low == "developer" then return "Developer" end
+            if low == "moderator" then return "Moderator" end
+            if low == "staff" or low == "admin" then return "Staff" end
+        end
         return nil
     end
 
@@ -13013,7 +13232,7 @@ do (function() -- isolated function: internal locals do not count toward the 200
 
     local function label(p)
         local under = false
-        if p.role and type(RolesModule.isUndercover) == "function" then
+        if p.role and type(RolesModule) == "table" and type(rawget(RolesModule, "isUndercover")) == "function" then
             local ok, u = pcall(RolesModule.isUndercover, p.id)
             under = ok and u == true
         end
@@ -13233,10 +13452,12 @@ do (function() -- isolated function: internal locals do not count toward the 200
     -- After re-entering world: check first if target is still here
     local function checkAfterEnter()
         Auto.resetReach()
+        if not Refs.Others or not Refs.Menu then pcall(Anim.quickRefs) end
         pcall(findDropRefs)
         pcall(Auto.findTreeRefs)
         table.clear(DropFailUntil)
         task.wait(1.5) -- wait for player list to populate
+        if not Refs.Others then pcall(Anim.quickRefs) end
         local th = threatsOf(playersHere())
         if #th > 0 then
             for _, p in ipairs(th) do Guard.Alerted[p.id] = true end
@@ -13250,7 +13471,7 @@ do (function() -- isolated function: internal locals do not count toward the 200
     end
 
     -- Staff online across the server (not just this world)
-    local lastScan, staffText = -10, "-"
+    local lastScan, lastRefCheck, staffText = -10, -10, "-"
     local function serverStaff()
         if os.clock() - lastScan < 3 then return staffText end
         lastScan = os.clock()
@@ -13271,19 +13492,27 @@ do (function() -- isolated function: internal locals do not count toward the 200
             return
         end
         local now = os.clock()
+        if (not Refs.Others or not Refs.Menu) and now - lastRefCheck >= 3 then
+            lastRefCheck = now
+            pcall(Anim.quickRefs)
+        end
         local mode = Guard.Mode
 
         -- ===== currently outside world =====
         if mode == "away" or mode == "out" then
             local fgNow = Refs.World and rawget(Refs.World, "fg")
+            local wn = worldName()
             if Guard.LeftFg and fgNow ~= Guard.LeftFg then
-                -- already re-entered world manually
-                if mode == "away" and Guard.Saved and worldName() == Guard.Saved.world then
-                    checkAfterEnter()
-                else
-                    Guard.Mode, Guard.Saved = "idle", nil
+                if wn ~= "" then
+                    -- already re-entered world manually
+                    if mode == "away" and Guard.Saved and wn:upper() == Guard.Saved.world:upper() then
+                        checkAfterEnter()
+                    else
+                        Guard.Mode, Guard.Saved = "idle", nil
+                    end
+                    return
                 end
-                return
+                Guard.LeftFg = fgNow
             end
             local name = Guard.Saved and Guard.Saved.world or ""
             if mode == "out" or name == "" then
@@ -13378,6 +13607,7 @@ do (function() -- isolated function: internal locals do not count toward the 200
         table.clear(Guard.Alerted)
         table.clear(Guard.Allow)
         if on then
+            if not Refs.Others or not Refs.Menu then pcall(Anim.quickRefs) end
             -- regular players already present are ignored (friends / alts)
             for _, p in ipairs(playersHere()) do
                 if not p.role then Guard.Allow[p.id] = true end
@@ -13395,6 +13625,7 @@ do (function() -- isolated function: internal locals do not count toward the 200
     Guard.anyRunning = anyRunning
     function Guard.afterEnter()
         Auto.resetReach()
+        if not Refs.Others or not Refs.Menu then pcall(Anim.quickRefs) end
         pcall(Session.bindMovement, true)
         pcall(findDropRefs)
         pcall(Auto.findTreeRefs)
