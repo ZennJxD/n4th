@@ -9,7 +9,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = legacy versi
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-15-punch-fix-1"
+Session.Build = "2026-11-15-path-glide-view-1"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -2960,6 +2960,11 @@ do (function()
             end
         end
         if xCount == 1 and yCount == 1 then
+            if vxCount == 0 and vyCount == 0 and yIdx and type(s.vx) == "number" and type(s.vy) == "number"
+               and ups[yIdx + 1] == s.vx and ups[yIdx + 2] == s.vy then
+                vxIdx = yIdx + 1; vxCount = 1
+                vyIdx = yIdx + 2; vyCount = 1
+            end
             stateFnRef = Refs.State
             stateUpIdx = {
                 x = xIdx, y = yIdx, grounded = gIdx,
@@ -3711,13 +3716,25 @@ do (function()
     end
 
     local function screenPosToTile(screenX, screenY)
-        local v = getView()
-        if not v then return nil end
         local pos = Vector2.new(screenX, screenY)
         local gg = PlayerGui:FindFirstChild("GameGui")
         if gg and gg:IsA("ScreenGui") and gg.IgnoreGuiInset then
             pos = pos + guiSvc:GetGuiInset()
         end
+        local w = Refs.World
+        local vw = type(w) == "table" and rawget(w, "view")
+        if type(vw) == "table" and type(vw[1]) == "number" and type(vw[2]) == "number"
+           and type(vw[3]) == "number" and type(vw[4]) == "number" and vw[3] > 0 and vw[4] > 0 then
+            local cam = workspace.CurrentCamera
+            local size = (gg and gg:IsA("ScreenGui") and gg.AbsoluteSize.X > 0 and gg.AbsoluteSize)
+                or (cam and cam.ViewportSize)
+            if size and size.X > 0 and size.Y > 0 then
+                return floor(vw[1] + (pos.X / size.X) * vw[3]) + State.CalibX,
+                       floor(vw[2] + (pos.Y / size.Y) * vw[4]) + State.CalibY
+            end
+        end
+        local v = getView()
+        if not v then return nil end
         local rel = pos - v.tiles.AbsolutePosition
         return floor(rel.X / v.ts) + State.CalibX, floor(rel.Y / v.ts) + State.CalibY
     end
@@ -3731,6 +3748,9 @@ do (function()
         if tx and ty then
             lastTapAt = now
             startGlideTo(tx, ty)
+        elseif Refs.World == nil then
+            lastTapAt = now
+            notify("Path Glide", "Enter a world and connect to the game first", 3)
         end
     end
 
