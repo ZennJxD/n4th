@@ -2828,8 +2828,14 @@ local function setInfJump(on)
 end
 
 local function setGhost(on, checkCollision)
+    if on then pcall(Session.bindMovement, true) end
     if checkCollision and on ~= Misc.Ghost then
         local checked, clear, reason = pcall(Session.checkGhostPosition)
+        if not checked or clear == nil then
+            pcall(Anim.quickRefs)
+            pcall(Session.bindMovement, true)
+            checked, clear, reason = pcall(Session.checkGhostPosition)
+        end
         local message
         if not checked or clear == nil then
             message = "Position or block data is unavailable. Connect to the game and try again."
@@ -2844,10 +2850,16 @@ local function setGhost(on, checkCollision)
         end
     end
     Misc.Ghost = on
+    if Session.GhostNoclip then
+        Session.GhostNoclip.active = false
+        Session.GhostNoclip.hover = false
+        Session.GhostNoclip.x, Session.GhostNoclip.y = nil, nil
+        Session.GhostNoclip.preX, Session.GhostNoclip.preY, Session.GhostNoclip.preT = nil, nil, nil
+    end
     if not on then
         Misc.UpHeld, Misc.DownHeld = false, false
-        if Refs.World then Refs.World.ghost = false end
     end
+    if Refs.World then Refs.World.ghost = on == true end
     if UI.FlyPad then UI.FlyPad.Enabled = on end
 end
 
@@ -2855,6 +2867,19 @@ local function setSpeed(pct)
     Misc.Speed = math.clamp(math.floor(tonumber(pct) or 100), 50, 500)
     if Misc.Speed == 100 and Refs.World then Refs.World.speedScale = 1 end
 end
+
+Session.GhostNoclip = {
+    active = false,
+    hover = false,
+    x = nil,
+    y = nil,
+    preX = nil,
+    preY = nil,
+    preT = nil,
+    inputs = {},
+    inputAt = {},
+    lastRefresh = 0,
+}
 
 -- Game movement keys are read from WorldMenu.isDown. Hooked so
 -- Fly UP/DN buttons work, and Clear / Farmer can press virtual keys.
@@ -2870,7 +2895,13 @@ local function isDownWrapper(saved, key, ...)
         if key == "keyDown" and Misc.DownHeld then return true end
         if key == "keyJump" and Misc.UpHeld then return true end
     end
-    return OrigIsDown(saved, key, ...)
+    local down = OrigIsDown(saved, key, ...)
+    if key == "keyLeft" or key == "keyRight" or key == "keyJump" or key == "keyDown" then
+        local gn = Session.GhostNoclip
+        gn.inputs[key] = down == true
+        gn.inputAt[key] = os.clock()
+    end
+    return down
 end
 
 function Session.tryMovementMenu(menu)
@@ -2927,13 +2958,176 @@ function Session.scheduleMovementRetry()
     end)
 end
 
--- Apply walkspeed & fly every frame (game may overwrite them)
-table.insert(Connections, RunService.Heartbeat:Connect(function()
-    local w = Refs.World
-    if not w or not alive() then return end
-    if Misc.Speed ~= 100 then w.speedScale = Misc.Speed / 100 end
-    if Misc.Ghost and w.ghost ~= true then w.ghost = true end
-end))
+-- Apply walkspeed & fly before/after game step + fallback noclip assist when solid collision blocks ghost
+do (function()
+    local gn = Session.GhostNoclip
+
+    local function resetNoclip()
+        gn.active = false
+        gn.hover = false
+        gn.x, gn.y = nil, nil
+        gn.preX, gn.preY, gn.preT = nil, nil, nil
+    end
+
+    local function applyWorldProps(w)
+        if Misc.Speed ~= 100 then w.speedScale = Misc.Speed / 100 end
+        if Misc.Ghost and w.ghost ~= true then w.ghost = true end
+    end
+
+    local function readState()
+        if not Refs.State then return nil end
+        local ok, s = pcall(Refs.State)
+        if ok and type(s) == "table" and type(s.x) == "number" and type(s.y) == "number"
+            and s.active ~= false and not s.dead then
+            return s
+        end
+        return nil
+    end
+
+    local function keyHeld(key, kc1, kc2, kc3)
+        if key == "keyJump" and Misc.UpHeld then return true end
+        if key == "keyDown" and Misc.DownHeld then return true end
+        local now = os.clock()
+        if gn.inputs[key] and (now - (gn.inputAt[key] or 0)) <= 0.15 then return true end
+        if OrigIsDown and Session.MovementMenu then
+            local ok, res = pcall(OrigIsDown, Session.MovementMenu, key)
+            if ok and res == true then return true end
+        end
+        if not UserInputService:GetFocusedTextBox() then
+            if kc1 and UserInputService:IsKeyDown(kc1) then return true end
+            if kc2 and UserInputService:IsKeyDown(kc2) then return true end
+            if kc3 and UserInputService:IsKeyDown(kc3) then return true end
+        end
+        return false
+    end
+
+    local function heldAxes()
+        local left = keyHeld("keyLeft", Enum.KeyCode.A, Enum.KeyCode.Left)
+        local right = keyHeld("keyRight", Enum.KeyCode.D, Enum.KeyCode.Right)
+        local up = keyHeld("keyJump", Enum.KeyCode.W, Enum.KeyCode.Up, Enum.KeyCode.Space)
+        local down = keyHeld("keyDown", Enum.KeyCode.S, Enum.KeyCode.Down)
+        return (right and 1 or 0) - (left and 1 or 0), (down and 1 or 0) - (up and 1 or 0)
+    end
+
+    local function ensureLiveRefs()
+        local now = os.clock()
+        if now - gn.lastRefresh < 2 then return end
+        local w = Refs.World
+        local staleWorld = (not w) or type(rawget(w, "fg")) ~= "table" or type(rawget(w, "w")) ~= "number"
+        if staleWorld or not Refs.State then
+            gn.lastRefresh = now
+            if staleWorld then Refs.World = nil end
+            pcall(Anim.quickRefs)
+            pcall(Session.bindMovement, true)
+        end
+    end
+
+    pcall(function()
+        RunService:BindToRenderStep("n4th_MiscPreRender", Enum.RenderPriority.First.Value - 10, function()
+            if not alive() then return end
+            local w = Refs.World
+            if w then applyWorldProps(w) end
+            if not Misc.Ghost or AutoInput.active then return end
+            local s = readState()
+            if not s then return end
+            if (gn.active or gn.hover) and gn.x and gn.y then
+                s.x = gn.x
+                s.y = gn.y
+                s.vx = 0
+                s.vy = 0
+                s.grounded = false
+            end
+            gn.preX, gn.preY, gn.preT = s.x, s.y, os.clock()
+        end)
+    end)
+
+    table.insert(Connections, RunService.Stepped:Connect(function()
+        if not alive() then return end
+        local w = Refs.World
+        if w then applyWorldProps(w) end
+    end))
+
+    table.insert(Connections, RunService.Heartbeat:Connect(function()
+        if not alive() then return end
+        if Misc.Ghost or Misc.Speed ~= 100 then ensureLiveRefs() end
+        local w = Refs.World
+        if not w then return end
+        applyWorldProps(w)
+        if not Misc.Ghost or AutoInput.active then
+            resetNoclip()
+            return
+        end
+        local s = readState()
+        if not s or type(w.w) ~= "number" or type(w.h) ~= "number" then return end
+        local hx, hy = heldAxes()
+        local now = os.clock()
+        local dt = math.clamp(now - (gn.preT or now), 1 / 240, 0.08)
+        local preX = gn.preX or s.x
+        local preY = gn.preY or s.y
+        local speed = 7.0 * (Misc.Speed / 100)
+        local minMove = speed * dt * 0.35
+        local overlap = Session.boxOverlapsSolid
+
+        local curX, curY = s.x, s.y
+        local overlapsNow = overlap and overlap(curX, curY) == true
+
+        if hx ~= 0 then
+            local movedX = (curX - preX) * hx
+            local aheadX = overlap and overlap(preX + hx * 0.2, preY) == true
+            if movedX < minMove and (overlapsNow or aheadX or gn.active) then
+                gn.active = true
+                gn.x = math.clamp((gn.x or preX) + hx * speed * dt, 0.35, w.w - 0.35)
+                s.x = gn.x
+                s.vx = 0
+            else
+                gn.x = curX
+            end
+        elseif gn.active then
+            s.x = gn.x or preX
+            s.vx = 0
+        else
+            gn.x = curX
+        end
+
+        local evalX = gn.x or curX
+        if hy ~= 0 then
+            local movedY = (curY - preY) * hy
+            local aheadY = overlap and overlap(evalX, preY + hy * 0.2) == true
+            local stuckY = (hy > 0 and s.grounded) or (hy < 0 and math.abs(s.vy or 0) < 0.05)
+            if movedY < minMove and (overlapsNow or aheadY or stuckY or gn.active) then
+                gn.active = true
+                gn.hover = true
+                gn.y = math.clamp((gn.y or preY) + hy * speed * dt, 0.96, w.h - 0.05)
+                s.y = gn.y
+                s.vy = 0
+                s.grounded = false
+            else
+                gn.y = curY
+                gn.hover = false
+            end
+        elseif gn.active then
+            s.y = gn.y or preY
+            s.vy = 0
+            s.grounded = false
+        elseif gn.hover or ((curY - preY) > 0.015 and not s.grounded) then
+            gn.hover = true
+            gn.y = gn.y or preY
+            s.y = gn.y
+            s.vy = 0
+            s.grounded = false
+        else
+            gn.y = curY
+        end
+
+        if gn.active and hx == 0 and hy == 0 then
+            local inside = overlap and overlap(gn.x or s.x, gn.y or s.y) == true
+            if not inside then
+                gn.active = false
+                if not gn.hover then resetNoclip() end
+            end
+        end
+    end))
+end)() end
 
 ---------------------------------------------------------------------
 -- FARM LOOP: place all first, then break one by one
@@ -3316,23 +3510,31 @@ local function solidAt(x, y)
     return it.solid and true or false
 end
 
-function Session.checkGhostPosition()
-    local s = playerState()
+function Session.boxOverlapsSolid(px, py)
     local w = Refs.World
-    if not s or not w or type(w.fg) ~= "table" or not Session.ItemDBSource
-        or not (math.abs(s.x) < math.huge and math.abs(s.y) < math.huge) then return nil end
+    if not w or type(w.fg) ~= "table" or not Session.ItemDBSource
+        or not (math.abs(px) < math.huge and math.abs(py) < math.huge) then return nil end
     -- Use character hitbox dimensions from game client's boxHits.
-    for y = floor(s.y - 0.95), floor(s.y - 0.0001) do
-        for x = floor(s.x - 0.3), floor(s.x + 0.3 - 0.0001) do
+    for y = floor(py - 0.95), floor(py - 0.0001) do
+        for x = floor(px - 0.3), floor(px + 0.3 - 0.0001) do
             if x >= 0 and x < w.w and y >= 0 and y < w.h then
                 if type(w.fg[y]) ~= "table" then return nil end
                 local id = fgIdAt(x, y)
                 if id ~= 0 and type(ItemDB[id]) ~= "table" then return nil end
             end
-            if solidAt(x, y) then
-                return false, "Your character still overlaps a block. Move into open space and turn it off again."
-            end
+            if solidAt(x, y) then return true end
         end
+    end
+    return false
+end
+
+function Session.checkGhostPosition()
+    local s = playerState()
+    if not s then return nil end
+    local hit = Session.boxOverlapsSolid(s.x, s.y)
+    if hit == nil then return nil end
+    if hit then
+        return false, "Your character still overlaps a block. Move into open space and turn it off again."
     end
     if math.abs(s.vx or 0) > 0.1 or math.abs(s.vy or 0) > 0.1 then
         return false, "Release movement controls and wait for your character to stop before turning Fly off."
@@ -16217,6 +16419,8 @@ function Session.refreshGameRefs(show)
     pcall(Anim.findFast)
     if State.LiteMode then setLite(true) end
     if Misc.InfJump then hookJammer() end
+    if Misc.Ghost and Refs.World then Refs.World.ghost = true end
+    if Misc.Speed ~= 100 and Refs.World then Refs.World.speedScale = Misc.Speed / 100 end
     pcall(function() UI.RefInfo:SetDesc(refsText()) end)
     updateStatus()
     print("[n4th] " .. Session.Build .. " | scanned=" .. tostring(Refs.ScanCount)
@@ -16714,6 +16918,7 @@ Session.Cleanup = function()
     AutoInput.active = false
     pcall(Auto.releaseInput)
     for _, c in ipairs(Connections) do pcall(function() c:Disconnect() end) end
+    pcall(function() RunService:UnbindFromRenderStep("n4th_MiscPreRender") end)
     -- restore original name (remove watermark)
     Misc.CustomName = false
     pcall(nameRestore)
