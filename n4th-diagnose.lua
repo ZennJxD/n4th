@@ -1,4 +1,4 @@
--- Pemeriksaan baca-saja: tidak memukul, memasang, atau mengirim remote game.
+-- Read-only check: does not punch, place, or fire game remotes.
 local lines = {}
 local function emit(message) lines[#lines + 1] = tostring(message) end
 local function keysOf(value, limit)
@@ -169,12 +169,12 @@ if shared then
 end
 
 if type(getgc) ~= "function" then
-    emit("STOP: executor tidak menyediakan getgc")
+    emit("STOP: executor does not provide getgc")
 else
     local ok, objects = pcall(getgc, true)
     if not ok or type(objects) ~= "table" then ok, objects = pcall(getgc) end
     if not ok or type(objects) ~= "table" then
-        emit("STOP: getgc gagal: " .. tostring(objects))
+        emit("STOP: getgc failed: " .. tostring(objects))
     else
         local worlds, bags, candidates, examined, readable, constantCount = 0, 0, {}, 0, 0, 0
         local visited, types, sources, prefix = 0, {}, {}, 0
@@ -227,7 +227,7 @@ else
                 local source = tostring(info(value, "s"))
                 sources[source] = (sources[source] or 0) + 1
                 local functionName = tostring(info(value, "n")):lower()
-                do -- source metadata bisa kosong/generik pada executor tertentu
+                do -- source metadata may be empty/generic on certain executors
                     examined += 1
                     local got, data = pcall(constants, value)
                     if got and type(data) == "table" then
@@ -277,6 +277,6 @@ local report = table.concat(lines, "\n")
 print(report)
 if type(setclipboard) == "function" then
     local ok = pcall(setclipboard, report)
-    if ok then print("[n4th] Laporan diagnosis sudah disalin. Paste ke chat ini.") end
+    if ok then print("[n4th] Diagnostic report copied to clipboard. Paste it into this chat.") end
 end
 return report

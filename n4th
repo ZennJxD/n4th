@@ -1,13 +1,13 @@
--- Loader tetap: cek commit terbaru, lalu ambil script dari URL commit tersebut.
-assert(type(loadstring) == "function", "[n4th] Executor tidak menyediakan loadstring setelah update.")
+-- Fixed loader: checks the latest commit, then fetches the script from that commit's URL.
+assert(type(loadstring) == "function", "[n4th] Executor does not provide loadstring after update.")
 local repository = "ZennJxD/n4th"
 local httpService = game:GetService("HttpService")
-local lastError = "respons kosong"
+local lastError = "empty response"
 
 local function reportFailure(message)
     pcall(function()
         game:GetService("StarterGui"):SetCore("SendNotification", {
-            Title = "n4th gagal dimuat",
+            Title = "n4th failed to load",
             Text = message:sub(1, 180),
             Duration = 8,
         })
@@ -16,10 +16,10 @@ local function reportFailure(message)
 end
 
 local function download(url)
-    local lastError = "respons kosong"
+    local lastError = "empty response"
     local function checked(source)
-        if type(source) ~= "string" or source:match("^%s*$") then return nil, "respons kosong" end
-        if source:match("^%s*<") then return nil, "server mengirim HTML, bukan script/metadata" end
+        if type(source) ~= "string" or source:match("^%s*$") then return nil, "empty response" end
+        if source:match("^%s*<") then return nil, "server returned HTML instead of script/metadata" end
         if source:match("^%s*[45]%d%d[:%s]") then return nil, source:sub(1, 120) end
         return source
     end
@@ -57,7 +57,7 @@ local function download(url)
         if valid then return valid end
         lastError = reason
     end
-    error("[n4th] Unduh gagal: " .. tostring(lastError), 0)
+    error("[n4th] Download failed: " .. tostring(lastError), 0)
 end
 
 local function latestSource()
@@ -66,8 +66,8 @@ local function latestSource()
     local ref = httpService:JSONDecode(download(refUrl))
     local commit = type(ref) == "table" and type(ref.object) == "table" and ref.object.sha
     if type(commit) ~= "string" or #commit ~= 40 or not commit:match("^%x+$") then
-        local reason = type(ref) == "table" and ref.message or "respons metadata tidak valid"
-        error("Gagal mengecek update GitHub: " .. tostring(reason), 0)
+        local reason = type(ref) == "table" and ref.message or "invalid metadata response"
+        error("Failed to check GitHub update: " .. tostring(reason), 0)
     end
     return download("https://raw.githubusercontent.com/" .. repository .. "/" .. commit .. "/n4th-main.lua"), commit
 end
@@ -83,10 +83,10 @@ for attempt = 1, 3 do
         local compiled, fn, compileError = pcall(loadstring, source, "n4th-main")
         if not compiled or type(fn) ~= "function" then compiled, fn, compileError = pcall(loadstring, source) end
         if not compiled or type(fn) ~= "function" then
-            reportFailure("[n4th] Script terbaru gagal dikompilasi: " .. tostring(compiled and compileError or fn))
+            reportFailure("[n4th] Latest script failed to compile: " .. tostring(compiled and compileError or fn))
         end
-        print(commit and ("[n4th] Menjalankan commit " .. commit:sub(1, 8)) or "[n4th] Menjalankan cabang main langsung")
-        -- Error runtime tidak memicu eksekusi ulang atau aksi game ganda.
+        print(commit and ("[n4th] Running commit " .. commit:sub(1, 8)) or "[n4th] Running main branch directly")
+        -- Runtime errors must not trigger re-execution or duplicate game actions.
         local ran, result = xpcall(fn, function(err)
             if debug and type(debug.traceback) == "function" then return debug.traceback(tostring(err), 2) end
             return tostring(err)
@@ -98,12 +98,12 @@ for attempt = 1, 3 do
                 if found and type(value) == "table" then globals = value end
             end
             local session = globals.__n4thOpus
-            local step = session and session.InitStep or "inisialisasi script"
-            reportFailure("[n4th] Gagal saat " .. tostring(step) .. ":\n" .. tostring(result))
+            local step = session and session.InitStep or "script initialization"
+            reportFailure("[n4th] Failed during " .. tostring(step) .. ":\n" .. tostring(result))
         end
         return result
     end
     lastError = tostring(source)
     if attempt < 3 then task.wait(1) end
 end
-reportFailure("[n4th] Gagal mengambil update setelah 3 percobaan: " .. lastError)
+reportFailure("[n4th] Failed to fetch update after 3 attempts: " .. lastError)

@@ -1,5 +1,5 @@
--- Probe v2: membaca schema Net dan source pemanggil pencarian world.
--- Tidak mengirim packet, memanggil remote, atau mengubah world.
+-- Probe v2: reads Net schema and world search caller source.
+-- Does not send packets, fire remotes, or modify the world.
 local output, size = {}, 0
 local budget = 240000
 local function emit(value)
@@ -73,7 +73,7 @@ local function sourceOf(label, fn)
     end
 end
 
--- Controller picker dapat berasal dari modul yang berbeda dari WorldMenu.
+-- Picker controller may come from a different module than WorldMenu.
 for _, root in ipairs({ gui or false, playerScripts or false }) do
     if root then
         for _, object in ipairs(root:GetDescendants()) do
@@ -144,13 +144,13 @@ local terms = { "worldsanswer", "openpicker", "worldpicker", "worldlist", "world
 for index, entry in ipairs(candidates) do
     if index > 12 or size >= budget then break end
     local object, label = entry.object, entry.object:GetFullName()
-    print("[n4th source v2] Membaca " .. label)
+    print("[n4th source v2] Reading " .. label)
     if type(decompile) ~= "function" then emit("decompile unavailable") break end
     local ok, source = pcall(decompile, object)
     if ok and type(source) == "string" then
         emit("SOURCE " .. label .. " | length=" .. #source)
         if object == netObject then
-            -- Net v1 terpotong di awal; v2 membawa semua schema paket/RPC.
+            -- Net v1 truncated early; v2 includes all packet/RPC schemas.
             emit(source)
         else
             local lower, ranges, matched = source:lower(), {}, {}
@@ -188,6 +188,6 @@ end
 local report = table.concat(output, "\n")
 if type(writefile) == "function" then pcall(writefile, "n4th-world-source-report.txt", report) end
 local copied = type(setclipboard) == "function" and pcall(setclipboard, report)
-if copied then print("[n4th] Source v2 sudah disalin (" .. #report .. " karakter). Paste ke chat ini.")
+if copied then print("[n4th] Source v2 copied (" .. #report .. " chars). Paste it into this chat.")
 else print(report) end
 return report
