@@ -9,7 +9,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = legacy versi
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-15-factory-stair-reach-1"
+Session.Build = "2026-11-15-punch-fix-1"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -1556,16 +1556,21 @@ local function isSetTileFn(fn)
     return hasSend and hasPlaced and hasFlips
 end
 
--- Game punch function: strings "Empty the Vending Machine first!" + "newCrack"
--- (legacy game: "HarvestProvider")
+-- Game punch function: vending message + "newCrack" (legacy game: "HarvestProvider")
 local function isPunchFn(fn)
     if not getconsts then return false end
     local ok, consts = pcall(getconsts, fn)
     if not ok or type(consts) ~= "table" then return false end
     local hasVend, hasMark = false, false
     for _, c in pairs(consts) do
-        if type(c) == "string" and c:lower():find("empty", 1, true) and c:lower():find("vending", 1, true) then hasVend = true
-        elseif c == "newCrack" or c == "HarvestProvider" then hasMark = true end
+        if type(c) == "string" then
+            local lower = c:lower()
+            if lower:find("vending", 1, true) and (lower:find("empty", 1, true) or lower:find("break", 1, true)) then
+                hasVend = true
+            elseif c == "newCrack" or c == "HarvestProvider" then
+                hasMark = true
+            end
+        end
     end
     return hasVend and hasMark
 end
