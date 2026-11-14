@@ -9,7 +9,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = legacy versi
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-15-pathfind-tp-1"
+Session.Build = "2026-11-15-pathfind-tp-2"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -860,8 +860,8 @@ local State = {
 local Misc = {
     Speed = 100,       -- walkspeed % (100 = normal)
     InfJump = false,
-    PathGlide = false, -- click/tap 1-click A* Pathfind TP (replaces slow glide)
-    TpDelay = 25,      -- delay (ms) between A* tile steps (0 = fastest, 25-60 = safer)
+    PathGlide = false, -- click/tap 1-click A* Pathfind TP
+    TpDelay = 70,      -- delay (ms) between A* tile steps (~67 ms = 1 tile per native 15 Hz sync)
     CustomName = true,          -- name watermark (always on, removed only when script closes)
     NameText = "https://dsc.gg/nath",  -- watermark text
 }
@@ -3448,7 +3448,7 @@ local function hazardAt(x, y)
     return it ~= nil and (it.deadly or it.hurts or it.laser) and true or false
 end
 
--- Safe A* Pathfind TP (1-click tile-by-tile packet teleport, never passes through solid or hazardous tiles)
+-- Safe A* Pathfind TP (1-click tile-by-tile synced step, never passes through solid or hazardous tiles)
 do (function()
     local guiSvc = game:GetService("GuiService")
     local floor, abs, sqrt = math.floor, math.abs, math.sqrt
@@ -3459,6 +3459,8 @@ do (function()
         gy = nil,
         curX = nil,
         curY = nil,
+        vx = 0,
+        vy = 0,
         facing = 1,
         rollbacks = 0,
         wroteOnce = false,
@@ -3466,37 +3468,11 @@ do (function()
         fg = nil,
     }
     Session.PathGlide = pg
-    local lastPacketT = -1
 
     local function groundBelow(tx, ty)
         if solidAt(tx, ty + 1) then return true end
         local it = fgItemAt(tx, ty + 1)
         return it ~= nil and it.platform == true
-    end
-
-    local function sendMovePacket(px, py, vx, vy, facing, grounded, s)
-        if not (NetOk and type(Net) == "table" and type(Net.move) == "table" and type(Net.move.send) == "function") then
-            return false
-        end
-        local flags = ((facing or 1) > 0 and 1 or 0)
-            + (grounded and 2 or 0)
-            + (s and s.dead and 4 or 0)
-            + (s and s.dancing and 8 or 0)
-            + (s and s.facepalm and 16 or 0)
-            + (s and s.hurt and 32 or 0)
-            + (s and s.raySpin and 64 or 0)
-            + (s and s.airJump and 128 or 0)
-        local t = floor(os.clock() * 1000) % 65535
-        if t == lastPacketT then t = (t + 1) % 65535 end
-        lastPacketT = t
-        return pcall(Net.move.send, {
-            x = px,
-            y = py,
-            vx = vx or 0,
-            vy = vy or 0,
-            flags = flags,
-            t = t,
-        })
     end
 
     local function canPassAir(x, y)
@@ -3602,15 +3578,13 @@ do (function()
         end
 
         local function hCost(x, y)
-            local dx, dy = abs(x - gx), abs(y - gy)
-            return math.max(dx, dy) + 0.41421356 * math.min(dx, dy)
+            return abs(x - gx) + abs(y - gy)
         end
 
         local gScore, parent, closed = { [startKey] = 0 }, {}, {}
         push(startKey, hCost(sx, sy))
         local dirs = {
             { 1, 0, 1 }, { -1, 0, 1 }, { 0, 1, 1 }, { 0, -1, 1 },
-            { 1, 1, 1.41421356 }, { 1, -1, 1.41421356 }, { -1, 1, 1.41421356 }, { -1, -1, 1.41421356 },
         }
         local found, expanded = false, 0
         while #heap > 0 and expanded < 16000 do
@@ -3656,6 +3630,8 @@ do (function()
         pg.active = false
         pg.gx, pg.gy = nil, nil
         pg.curX, pg.curY = nil, nil
+        pg.vx, pg.vy = 0, 0
+        pg.onFloor = false
         pg.rollbacks = 0
         pg.wroteOnce = false
         pg.world, pg.fg = nil, nil
@@ -3670,6 +3646,8 @@ do (function()
         local token = pg.token
         pg.gx, pg.gy = fx, fy
         pg.curX, pg.curY = startX, startY
+        pg.vx, pg.vy = 0, 0
+        pg.onFloor = groundBelow(floor(startX), floor(startY - 0.001))
         pg.facing = startFacing or 1
         pg.rollbacks = 0
         pg.wroteOnce = false
@@ -3679,17 +3657,35 @@ do (function()
         task.spawn(function()
             local prevX, prevY = startX, startY
             local curFacing = startFacing or 1
-            local n = #path
-            for i = 1, n do
+            local function pushStep(nx, ny, onFloorNow, svx, svy)
+                local delayMs = math.clamp(math.floor(tonumber(Misc.TpDelay) or 70), 30, 160)
+                local dx0, dy0 = nx - prevX, ny - prevY
+                local dist0 = sqrt(dx0 * dx0 + dy0 * dy0)
+                if dist0 > 0.001 then
+                    pg.vx = (dx0 / dist0) * 0.25
+                    pg.vy = (dy0 / dist0) * 0.25
+                end
+                task.wait(delayMs / 1000)
+
                 if not alive() or not pg.active or pg.token ~= token
                    or not Misc.PathGlide or AutoInput.active or WorldFinder.Busy then
-                    return
+                    return false
                 end
                 local curW = Refs.World
                 if not curW or curW ~= pg.world or curW.fg ~= pg.fg then
                     stopGlide()
-                    return
+                    return false
                 end
+
+                pg.curX, pg.curY, pg.facing = nx, ny, curFacing
+                pg.vx, pg.vy, pg.onFloor, pg.wroteOnce = svx, svy, onFloorNow, true
+                Session.writeStatePos(nx, ny, not onFloorNow, curFacing, svx, svy)
+                prevX, prevY = nx, ny
+                return true
+            end
+
+            local n = #path
+            for i = 1, n do
                 local wp = path[i]
                 if not segmentSafe(prevX, prevY, wp.x, wp.y) then
                     if (depth or 0) < 2 and pg.gx then
@@ -3706,27 +3702,19 @@ do (function()
                 local dx, dy = wp.x - prevX, wp.y - prevY
                 if dx > 0.02 then curFacing = 1 elseif dx < -0.02 then curFacing = -1 end
                 local isLast = (i == n)
-                local onFloor = isLast and groundBelow(wp.tx, wp.ty)
+                local onFloor = groundBelow(wp.tx, wp.ty)
                 local destY = onFloor and (wp.ty + 1) or wp.y
-                local delayMs = math.clamp(math.floor(tonumber(Misc.TpDelay) or 25), 0, 150)
-                local dtSim = math.max(delayMs / 1000, 1 / 60)
-                local svx = isLast and 0 or math.clamp(dx / dtSim, -30, 30)
-                local svy = isLast and 0 or math.clamp(dy / dtSim, -30, 30)
+                local dist = sqrt(dx * dx + (destY - prevY) ^ 2)
+                local ux = dist > 0.001 and (dx / dist) or 0
+                local uy = dist > 0.001 and ((destY - prevY) / dist) or 0
+                local svx = (not isLast) and (ux * 0.25) or 0
+                local svy = (not isLast) and (uy * 0.25) or 0
 
-                pg.curX, pg.curY, pg.facing, pg.wroteOnce = wp.x, destY, curFacing, true
-                Session.writeStatePos(wp.x, destY, not onFloor, curFacing, 0, 0)
-                sendMovePacket(wp.x, destY, svx, svy, curFacing, onFloor, Session.readState())
-                prevX, prevY = wp.x, destY
-
-                if not isLast then
-                    if delayMs <= 0 then
-                        if i % 3 == 0 then RunService.Heartbeat:Wait() end
-                    elseif delayMs <= 12 then
-                        if i % 2 == 0 then RunService.Heartbeat:Wait() end
-                    else
-                        task.wait(delayMs / 1000)
-                    end
+                if dist > 1.05 then
+                    local midX, midY = (prevX + wp.x) * 0.5, (prevY + destY) * 0.5
+                    if not pushStep(midX, midY, false, ux * 0.25, uy * 0.25) then return end
                 end
+                if not pushStep(wp.x, destY, onFloor, svx, svy) then return end
             end
             if pg.active and pg.token == token then
                 stopGlide()
@@ -3747,7 +3735,8 @@ do (function()
             notify("Pathfind TP", fx or "No safe path", 2.5)
             return
         end
-        if not Session.writeStatePos or not Session.writeStatePos(s.x, s.y, true, s.facing or 1, 0, 0) then
+        local initFloor = groundBelow(sx, sy)
+        if not Session.writeStatePos or not Session.writeStatePos(s.x, s.y, not initFloor, s.facing or 1, 0.25 * (s.facing or 1), 0) then
             notify("Pathfind TP", "Position control is unavailable on this executor", 4)
             return
         end
@@ -3898,7 +3887,7 @@ do (function()
             end
         end
         if pg.curX and pg.curY and Session.writeStatePos then
-            Session.writeStatePos(pg.curX, pg.curY, true, pg.facing, 0, 0)
+            Session.writeStatePos(pg.curX, pg.curY, not pg.onFloor, pg.facing, pg.vx or 0, pg.vy or 0)
         end
     end
 
@@ -17214,9 +17203,9 @@ do
 
     addNumber(character, {
         Title = "TP step delay (ms)",
-        Desc = "Delay per tile step (0 = fastest burst, 25-60 = safer against rollback)",
-        Min = 0, Max = 150, Step = 5, Default = Misc.TpDelay,
-        Callback = function(v) Misc.TpDelay = math.clamp(math.floor(v), 0, 150) end,
+        Desc = "Delay per tile step (65-90 ms recommended; below 60 risks rollback or noclip kick)",
+        Min = 30, Max = 160, Step = 5, Default = Misc.TpDelay,
+        Callback = function(v) Misc.TpDelay = math.clamp(math.floor(v), 30, 160) end,
     })
 
     safe(function()
