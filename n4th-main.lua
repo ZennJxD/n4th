@@ -9,7 +9,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = legacy versi
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-14-path-glide-2"
+Session.Build = "2026-11-15-factory-stair-reach-1"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -4199,7 +4199,7 @@ local function astar(sx, sy, goals, _gx, _gy, R, useBlock, route)
     end
     local hf, hi, hn = {}, {}, 0
     hn = heapPush(hf, hi, hn, h(sx, sy), startI)
-    local expanded = 0
+    local expanded, skippedBad = 0, false
     local now = os.clock()
     local nextSlice, popped = now + 0.0015, 0
     local bestGoal, bestCount, bestCost, costLimit = nil, 0, math.huge, nil
@@ -4235,7 +4235,9 @@ local function astar(sx, sy, goals, _gx, _gy, R, useBlock, route)
                 local ni = ey[k] * W + ex[k]
                 if not closed[ni] then
                     local bad = edgeFailures[cur * WH + ni]
-                    if not (bad and bad > now) then
+                    if bad and bad > now then
+                        skippedBad = true
+                    else
                         local ng = gc + ec[k]
                         local old = g[ni]
                         if (not costLimit or ng <= costLimit) and (old == nil or ng < old) then
@@ -4248,7 +4250,7 @@ local function astar(sx, sy, goals, _gx, _gy, R, useBlock, route)
         end
     end
     if bestGoal then return makePath(bestGoal), false, closed end
-    return nil, true, closed -- no path at all
+    return nil, not skippedBad, closed -- no path (false exhausted if BadEdge hid edges)
 end
 
 -- All tiles reachable from this area
@@ -4508,6 +4510,7 @@ function Move.execStair(e)
     if not execWalk(e.fx, e.fy) then return false end
     local dir = (e.x > e.fx) and 1 or -1
     local top = e.y + 1 -- target foot height (top of footing block)
+    local openHead = not solidAt(e.fx, e.y - 1) -- open shaft overhead (no ceiling above takeoff)
     local hug = e.fx + 0.5 + dir * 0.17
     for try = 1, 3 do
         -- hug wall on target side
@@ -4524,6 +4527,9 @@ function Move.execStair(e)
         local s0 = playerState()
         if not s0 then return false end
         local y0 = s0.y
+        local releaseY = openHead
+            and (try == 1 and top + 0.18 or (try == 2 and top + 0.05 or top - 0.10))
+            or (top - 0.1)
         AutoInput.jump = true
         t0 = os.clock()
         local airborne, landed = false, nil
@@ -4531,16 +4537,19 @@ function Move.execStair(e)
             local s = playerState()
             if not s or s.dead then return false end
             if not s.grounded then airborne = true end
-            if AutoInput.jump and (s.y <= top - 0.1 or (airborne and (s.vy or 0) >= 0)) then
+            if AutoInput.jump and (s.y <= releaseY or (airborne and (s.vy or 0) >= 0)) then
                 AutoInput.jump = false -- reached target height / hit ceiling
             end
             -- When jumping under corridor ceiling, head presses ceiling ~0.18s while feet clear target
             -- block: press direction then -> body enters corridor smoothly (no game step-up needed).
             -- DO NOT press direction from floor: body slips under target block -> head bonk -> fall.
-            -- try 1: once feet reach top of target block (touching ceiling)
-            -- try 2: after rising 0.15 tile (pressing block side, game steps body up <= 0.3 tile)
-            -- try 3: when feet are 0.25 tile below block top
-            local press = (try == 1 and s.y <= top + 0.02) or (try == 2 and s.y <= y0 - 0.15) or (try == 3 and s.y <= top + 0.25)
+            -- When no ceiling sits overhead (openHead), release jump earlier so apex doesn't overshoot.
+            local press
+            if openHead then
+                press = (try == 1 and s.y <= top + 0.20) or (try == 2 and s.y <= top + 0.25) or (try == 3 and s.y <= y0 - 0.15)
+            else
+                press = (try == 1 and s.y <= top + 0.02) or (try == 2 and s.y <= y0 - 0.15) or (try == 3 and s.y <= top + 0.25)
+            end
             if airborne and press then
                 AutoInput.right, AutoInput.left = dir > 0, dir < 0
             else
@@ -4699,7 +4708,7 @@ local function travelGroup(sx, sy, group, R, useBlock, skipTbl, failTbl)
         return true
     end
     -- no path to this group
-    for _, t in ipairs(group) do skipTile(skipTbl, t.idx, exhausted and 60 or 30) end
+    for _, t in ipairs(group) do skipTile(skipTbl, t.idx, exhausted and 60 or 12) end
     if exhausted and w then storeReach(sy * w.w + sx, R, useBlock, closed) end
     releaseInput()
     return false
@@ -7595,6 +7604,10 @@ end
 -- 1 factory step. o = { seed, block, drop, breakMode, whole, exclude, live, phase }
 -- Returns: "drop" | "work" | "move" | "wait" | "break" | "next" | "idle" (+ seconds to ready tree)
 local function factoryStep(o)
+    if not Refs.Trees and os.clock() - (o.treeScanAt or 0) > 5 then
+        o.treeScanAt = os.clock()
+        pcall(findTreeRefs)
+    end
     local seeds, blocks = invCount(o.seed), invCount(o.block)
     local dropAt = math.min(Factory.DropAt, CAP)
     local handledByAutoDrop = AutoDrop.On and table.find(AutoDrop.Items, o.seed) and AutoDrop.targetError() == nil
@@ -7697,21 +7710,23 @@ local function factoryLoop(runId)
         if r ~= "idle" then o.stuckAt = nil end
         if r == "idle" then
             local seeds, blocks = invCount(o.seed), invCount(o.block)
-            if not nextReady and (nReady or 0) == 0 and seeds <= 0 and blocks <= 0 then
+            if Refs.Trees and not nextReady and (nReady or 0) == 0 and seeds <= 0 and blocks <= 0 then
                 if Factory.stop then Factory.stop("Out of seeds & blocks, no trees growing") end
                 break
             end
             if (nReady or 0) > 0 then
                 -- ready trees unreachable: periodically reset skip list & path history
                 o.stuckAt = o.stuckAt or os.clock()
-                if os.clock() - o.stuckAt > 30 then
+                if os.clock() - o.stuckAt > 8 then
                     o.stuckAt = nil
                     table.clear(Factory.Skip)
                     table.clear(BadEdge)
                     Reach = nil
                 end
             end
-            if seeds >= CAP - 20 and not (Factory.Drop and Factory.pointSet()) then
+            if not Refs.Trees then
+                Factory.Status = "Tree refs not found, retrying... (or press Connect to game)"
+            elseif seeds >= CAP - 20 and not (Factory.Drop and Factory.pointSet()) then
                 Factory.Status = ("Seeds nearly full (%d): set drop point & enable Auto drop seeds"):format(seeds)
             elseif (nReady or 0) > 0 then
                 Factory.Status = nReady .. " ready trees unreachable, retrying"
@@ -7752,7 +7767,7 @@ function Factory.start()
     local block = blockOfSeed(Factory.SeedId)
     if not Refs.World then
         err = "World data not found. Press 'Connect to game'"
-    elseif not Session.bindMovement(true, true) then
+    elseif not Session.bindMovement(true) then
         err = "Game movement controls (WorldMenu.isDown) not found"
     elseif not playerState() then
         err = "You are not in a world yet"
@@ -7772,12 +7787,15 @@ function Factory.start()
     if Clear.Running then stopClear("Stopped because Factory started") end
     if Farmer.Running then stopFarmer("Stopped because Factory started") end
     if Splice.Running and Splice.stop then Splice.stop("Stopped because Factory started") end
-    if not Refs.Trees then findTreeRefs() end
+    if not Refs.Trees and not findTreeRefs() then
+        notify("Factory", "Tree refs not found yet; retrying while running", 3)
+    end
     Factory.BlockId = block
     Factory.Home = Guard.worldName()
     table.clear(Factory.Skip)
     table.clear(Factory.Row)
     table.clear(BadEdge)
+    Reach = nil
     Factory.DropOffUntil, Factory.BreakFailUntil = 0, 0
     Factory.Running = true
     Factory.RunId = (Factory.RunId or 0) + 1
