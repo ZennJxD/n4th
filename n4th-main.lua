@@ -9,7 +9,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = legacy versi
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-14-finder-rejoin-drop-1"
+Session.Build = "2026-11-14-path-glide-1"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -858,11 +858,10 @@ local State = {
 }
 
 local Misc = {
-    Speed = 100,      -- walkspeed % (100 = normal)
+    Speed = 100,       -- walkspeed % (100 = normal)
     InfJump = false,
-    Ghost = false,    -- fly + noclip through blocks
-    UpHeld = false,   -- on-screen UP button held
-    DownHeld = false, -- on-screen DN button held
+    PathGlide = false, -- click/tap safe open-air path glide (replaces fly + noclip)
+    GlideSpeed = 18,   -- tiles per second along safe path
     CustomName = true,          -- name watermark (always on, removed only when script closes)
     NameText = "https://dsc.gg/nath",  -- watermark text
 }
@@ -1391,7 +1390,7 @@ State.PlaceMs = math.max(State.PlaceMs, 140)
 State.BreakMs = math.max(State.BreakMs, 200)
 Farmer.HarvestMs = math.max(Farmer.HarvestMs, 140)
 Farmer.PlantMs = math.max(Farmer.PlantMs, 140)
-Config.add("Misc", Misc, { "Speed" })
+Config.add("Misc", Misc, { "Speed", "GlideSpeed" })
 Config.add("Chat", Spam, { "Texts", "IntervalSec" })
 Config.add("Land", Land, { "X0", "X1", "Y0" })
 Config.add("DirtFarm", Build.Dirt, { "X0", "X1", "Y0", "Y1", "Dig" })
@@ -2808,7 +2807,7 @@ local function setLite(on)
 end
 
 ---------------------------------------------------------------------
--- MISC: walkspeed, infinite jump, fly + noclip
+-- MISC: walkspeed, infinite jump, click path glide
 ---------------------------------------------------------------------
 -- Infinite jump: tricks game into thinking an Antigravity Generator is active, allowing mid-air jumps
 local OrigJammerOn = nil
@@ -2842,65 +2841,24 @@ local function setInfJump(on)
     if on then hookJammer() else unhookJammer() end
 end
 
-local function setGhost(on, checkCollision)
+local function setPathGlide(on)
+    Misc.PathGlide = on == true
     if on then
+        Session.PathGlideArmedAt = os.clock()
         pcall(Session.bindMovement, true)
-        if Session.bindNoclipHooks then pcall(Session.bindNoclipHooks) end
+    elseif Session.stopPathGlide then
+        Session.stopPathGlide()
     end
-    if checkCollision and not on and on ~= Misc.Ghost then
-        local checked, clear, reason = pcall(Session.checkGhostPosition)
-        if not checked or clear == nil then
-            pcall(Anim.quickRefs)
-            pcall(Session.bindMovement, true)
-            checked, clear, reason = pcall(Session.checkGhostPosition)
-        end
-        local message
-        if not checked or clear == nil then
-            message = "Position or block data is unavailable. Connect to the game and try again."
-        elseif not clear then
-            message = reason
-        end
-        if message then
-            Misc.UpHeld, Misc.DownHeld = false, false
-            if UI.GhostToggle then pcall(function() UI.GhostToggle:Set(Misc.Ghost, false) end) end
-            notify("Fly + Noclip", message, 5)
-            return
-        end
-    end
-    Misc.Ghost = on
-    if Session.GhostNoclip then
-        Session.GhostNoclip.active = false
-        Session.GhostNoclip.hover = false
-        Session.GhostNoclip.x, Session.GhostNoclip.y = nil, nil
-        Session.GhostNoclip.preX, Session.GhostNoclip.preY, Session.GhostNoclip.preT = nil, nil, nil
-    end
-    if not on then
-        Misc.UpHeld, Misc.DownHeld = false, false
-    end
-    if Refs.World then Refs.World.ghost = on == true end
-    if UI.FlyPad then UI.FlyPad.Enabled = on end
 end
+Session.setPathGlide = setPathGlide
 
 local function setSpeed(pct)
     Misc.Speed = math.clamp(math.floor(tonumber(pct) or 100), 50, 500)
     if Misc.Speed == 100 and Refs.World then Refs.World.speedScale = 1 end
 end
 
-Session.GhostNoclip = {
-    active = false,
-    hover = false,
-    x = nil,
-    y = nil,
-    preX = nil,
-    preY = nil,
-    preT = nil,
-    inputs = {},
-    inputAt = {},
-    lastRefresh = 0,
-}
-
 -- Game movement keys are read from WorldMenu.isDown. Hooked so
--- Fly UP/DN buttons work, and Clear / Farmer can press virtual keys.
+-- Clear / Farmer can press virtual keys and manual input cancels Path Glide.
 local OrigIsDown = nil
 local function isDownWrapper(saved, key, ...)
     if AutoInput.active then
@@ -2909,15 +2867,9 @@ local function isDownWrapper(saved, key, ...)
         if key == "keyJump" then return AutoInput.jump end
         if key == "keyDown" then return AutoInput.down end
     end
-    if Misc.Ghost then
-        if key == "keyDown" and Misc.DownHeld then return true end
-        if key == "keyJump" and Misc.UpHeld then return true end
-    end
     local down = OrigIsDown(saved, key, ...)
-    if key == "keyLeft" or key == "keyRight" or key == "keyJump" or key == "keyDown" then
-        local gn = Session.GhostNoclip
-        gn.inputs[key] = down == true
-        gn.inputAt[key] = os.clock()
+    if down and Misc.PathGlide and (key == "keyLeft" or key == "keyRight" or key == "keyJump" or key == "keyDown") then
+        if Session.stopPathGlide then Session.stopPathGlide() end
     end
     return down
 end
@@ -2976,173 +2928,11 @@ function Session.scheduleMovementRetry()
     end)
 end
 
--- Apply walkspeed & fly before/after game step + hook game boxHits/platform collision for noclip
+-- Apply walkspeed and step Path Glide before/after game physics ticks.
 do (function()
-    local gn = Session.GhostNoclip
     local env = type(getfenv) == "function" and getfenv(0) or _G
-    local hookFn = rawget(env, "hookfunction") or rawget(G, "hookfunction") or rawget(_G, "hookfunction")
-        or rawget(env, "replaceclosure") or rawget(G, "replaceclosure") or rawget(_G, "replaceclosure")
     local setUp = (debug and debug.setupvalue) or rawget(env, "setupvalue") or rawget(G, "setupvalue") or rawget(_G, "setupvalue")
-    local noclipHooked = setmetatable({}, { __mode = "k" })
-    local lastHookScan, stateFnRef, stateUpIdx = -math.huge, nil, nil
-
-    local function resetNoclip()
-        gn.active = false
-        gn.hover = false
-        gn.x, gn.y = nil, nil
-        gn.preX, gn.preY, gn.preT = nil, nil, nil
-    end
-
-    local function isSolidAtFn(fn)
-        if type(fn) ~= "function" then return false end
-        local comb, vip, ent = false, false, false
-        for _, c in pairs(getconsts(fn)) do
-            if c == "combiner" then comb = true
-            elseif c == "vip" then vip = true
-            elseif c == "entrance" then ent = true end
-            if comb and vip and ent then return true end
-        end
-        return false
-    end
-
-    local function isBoxHitsFn(fn)
-        if type(fn) ~= "function" or noclipHooked[fn] or not isGameFn(fn) then return false end
-        local nC, has95, has3, hasEps = 0, false, false, false
-        for _, c in pairs(getconsts(fn)) do
-            nC += 1
-            if nC > 24 then return false end
-            if type(c) == "number" then
-                local a = math.abs(c)
-                if math.abs(a - 0.95) < 1e-4 then has95 = true
-                elseif math.abs(a - 0.3) < 1e-4 then has3 = true
-                elseif math.abs(a - 0.0001) < 1e-6 then hasEps = true end
-            elseif c == "platform" or c == "culled" then
-                return false
-            end
-        end
-        if not (has95 and has3 and hasEps) then return false end
-        local nUp, hasSolid = 0, false
-        for _, v in pairs(getUpvalues(fn)) do
-            nUp += 1
-            if nUp > 3 then return false end
-            if isSolidAtFn(v) then hasSolid = true end
-        end
-        return hasSolid
-    end
-
-    local function isPlatformFn(fn)
-        if type(fn) ~= "function" or noclipHooked[fn] or not isGameFn(fn) then return false end
-        local nC, hasPlat, has3, hasEps = 0, false, false, false
-        for _, c in pairs(getconsts(fn)) do
-            nC += 1
-            if nC > 30 then return false end
-            if c == "platform" then hasPlat = true
-            elseif type(c) == "number" then
-                local a = math.abs(c)
-                if math.abs(a - 0.3) < 1e-4 then has3 = true
-                elseif math.abs(a - 0.001) < 1e-5 then hasEps = true end
-            end
-        end
-        if not (hasPlat and has3 and hasEps) then return false end
-        local nUp, hasWorld = 0, false
-        for _, v in pairs(getUpvalues(fn)) do
-            nUp += 1
-            if nUp > 8 then return false end
-            if v == Refs.World or (type(v) == "table" and rawget(v, "fg") ~= nil) then hasWorld = true end
-        end
-        return hasWorld
-    end
-
-    local function installNoclipHook(fn, kind)
-        if type(hookFn) ~= "function" or noclipHooked[fn] then return false end
-        local orig
-        local wrapper
-        if kind == "boxHits" then
-            wrapper = function(px, py, ...)
-                if alive() and Misc.Ghost and not AutoInput.active then
-                    local w = Refs.World
-                    if type(w) == "table" and type(w.w) == "number" and type(w.h) == "number"
-                        and type(px) == "number" and type(py) == "number" then
-                        if px - 0.3 < 0 or px + 0.3 > w.w or py > w.h or py - 0.95 < 0 then
-                            return true
-                        end
-                    end
-                    return false
-                end
-                return orig(px, py, ...)
-            end
-        else
-            wrapper = function(a1, a2, ...)
-                if alive() and Misc.Ghost and not AutoInput.active then
-                    return false
-                end
-                return orig(a1, a2, ...)
-            end
-        end
-        local ok, prev = pcall(hookFn, fn, wrapper)
-        if ok and type(prev) == "function" then
-            orig = prev
-            noclipHooked[fn] = true
-            noclipHooked[wrapper] = true
-            if kind == "boxHits" then
-                Session.BoxHitsHooked = true
-            else
-                Session.PlatformHooked = true
-            end
-            return true
-        end
-        return false
-    end
-
-    local function probeNoclipFn(fn, seen, depth)
-        if type(fn) ~= "function" or seen[fn] or noclipHooked[fn] then return end
-        seen[fn] = true
-        if not Session.BoxHitsHooked and isBoxHitsFn(fn) then
-            installNoclipHook(fn, "boxHits")
-        elseif not Session.PlatformHooked and isPlatformFn(fn) then
-            installNoclipHook(fn, "platform")
-        elseif depth < 2 and isGameFn(fn) then
-            for _, u in pairs(getUpvalues(fn)) do
-                if type(u) == "function" then probeNoclipFn(u, seen, depth + 1) end
-                if Session.BoxHitsHooked and Session.PlatformHooked then break end
-            end
-        end
-    end
-
-    function Session.bindNoclipHooks(force)
-        if Session.BoxHitsHooked and Session.PlatformHooked then return true end
-        if type(hookFn) ~= "function" then return false end
-        local seen = {}
-        if type(getconnections) == "function" then
-            local ok, conns = pcall(getconnections, RunService.RenderStepped)
-            if ok and type(conns) == "table" then
-                for _, conn in pairs(conns) do
-                    local fn = Session.connectionFunction(conn)
-                    if type(fn) == "function" then probeNoclipFn(fn, seen, 0) end
-                    if Session.BoxHitsHooked and Session.PlatformHooked then return true end
-                end
-            end
-        end
-        local now = os.clock()
-        if not force and now - lastHookScan < 2 then return Session.BoxHitsHooked == true end
-        lastHookScan = now
-        if type(getgc) == "function" then
-            local ok, objs = pcall(getgc, false)
-            if ok and type(objs) == "table" then
-                for _, v in pairs(objs) do
-                    if type(v) == "function" and not seen[v] and not noclipHooked[v] then
-                        if not Session.BoxHitsHooked and isBoxHitsFn(v) then
-                            installNoclipHook(v, "boxHits")
-                        elseif not Session.PlatformHooked and isPlatformFn(v) then
-                            installNoclipHook(v, "platform")
-                        end
-                        if Session.BoxHitsHooked and Session.PlatformHooked then break end
-                    end
-                end
-            end
-        end
-        return Session.BoxHitsHooked == true
-    end
+    local stateFnRef, stateUpIdx, lastRefRefresh = nil, nil, 0
 
     local function bindStateUpvals()
         if type(setUp) ~= "function" or not Refs.State then return nil end
@@ -3175,7 +2965,7 @@ do (function()
         return nil
     end
 
-    local function writeStatePos(px, py, clearGround)
+    function Session.writeStatePos(px, py, clearGround)
         local idx = bindStateUpvals()
         if not idx or not Refs.State then return false end
         if px then pcall(setUp, Refs.State, idx.x, px) end
@@ -3186,12 +2976,7 @@ do (function()
         return true
     end
 
-    local function applyWorldProps(w)
-        if Misc.Speed ~= 100 then w.speedScale = Misc.Speed / 100 end
-        if Misc.Ghost and w.ghost ~= true then w.ghost = true end
-    end
-
-    local function readState()
+    function Session.readState()
         if not Refs.State then return nil end
         local ok, s = pcall(Refs.State)
         if ok and type(s) == "table" and type(s.x) == "number" and type(s.y) == "number"
@@ -3201,42 +2986,20 @@ do (function()
         return nil
     end
 
-    local function keyHeld(key, kc1, kc2, kc3)
-        if key == "keyJump" and Misc.UpHeld then return true end
-        if key == "keyDown" and Misc.DownHeld then return true end
-        local now = os.clock()
-        if gn.inputs[key] and (now - (gn.inputAt[key] or 0)) <= 0.15 then return true end
-        if OrigIsDown and Session.MovementMenu then
-            local ok, res = pcall(OrigIsDown, Session.MovementMenu, key)
-            if ok and res == true then return true end
-        end
-        if not UserInputService:GetFocusedTextBox() then
-            if kc1 and UserInputService:IsKeyDown(kc1) then return true end
-            if kc2 and UserInputService:IsKeyDown(kc2) then return true end
-            if kc3 and UserInputService:IsKeyDown(kc3) then return true end
-        end
-        return false
-    end
-
-    local function heldAxes()
-        local left = keyHeld("keyLeft", Enum.KeyCode.A, Enum.KeyCode.Left)
-        local right = keyHeld("keyRight", Enum.KeyCode.D, Enum.KeyCode.Right)
-        local up = keyHeld("keyJump", Enum.KeyCode.W, Enum.KeyCode.Up, Enum.KeyCode.Space)
-        local down = keyHeld("keyDown", Enum.KeyCode.S, Enum.KeyCode.Down)
-        return (right and 1 or 0) - (left and 1 or 0), (down and 1 or 0) - (up and 1 or 0)
+    local function applyWorldProps(w)
+        if Misc.Speed ~= 100 then w.speedScale = Misc.Speed / 100 end
     end
 
     local function ensureLiveRefs()
         local now = os.clock()
-        if now - gn.lastRefresh < 2 then return end
+        if now - lastRefRefresh < 2 then return end
         local w = Refs.World
         local staleWorld = (not w) or type(rawget(w, "fg")) ~= "table" or type(rawget(w, "w")) ~= "number"
-        if staleWorld or not Refs.State or (Misc.Ghost and not Session.BoxHitsHooked) then
-            gn.lastRefresh = now
+        if staleWorld or not Refs.State then
+            lastRefRefresh = now
             if staleWorld then Refs.World = nil end
             pcall(Anim.quickRefs)
             pcall(Session.bindMovement, true)
-            if Misc.Ghost then pcall(Session.bindNoclipHooks) end
         end
     end
 
@@ -3245,13 +3008,7 @@ do (function()
             if not alive() then return end
             local w = Refs.World
             if w then applyWorldProps(w) end
-            if not Misc.Ghost or AutoInput.active then return end
-            local s = readState()
-            if not s then return end
-            if not Session.BoxHitsHooked and (gn.active or gn.hover) and gn.x and gn.y then
-                writeStatePos(gn.x, gn.y, true)
-            end
-            gn.preX, gn.preY, gn.preT = s.x, s.y, os.clock()
+            if Session.preRenderPathGlide then Session.preRenderPathGlide() end
         end)
     end)
 
@@ -3263,75 +3020,11 @@ do (function()
 
     table.insert(Connections, RunService.Heartbeat:Connect(function()
         if not alive() then return end
-        if Misc.Ghost or Misc.Speed ~= 100 then ensureLiveRefs() end
+        if Misc.PathGlide or Misc.Speed ~= 100 then ensureLiveRefs() end
         local w = Refs.World
         if not w then return end
         applyWorldProps(w)
-        if not Misc.Ghost or AutoInput.active or Session.BoxHitsHooked then
-            resetNoclip()
-            return
-        end
-        local s = readState()
-        if not s or type(w.w) ~= "number" or type(w.h) ~= "number" then return end
-        local hx, hy = heldAxes()
-        local now = os.clock()
-        local dt = math.clamp(now - (gn.preT or now), 1 / 240, 0.08)
-        local preX = gn.preX or s.x
-        local preY = gn.preY or s.y
-        local speed = 7.0 * (Misc.Speed / 100)
-        local minMove = speed * dt * 0.35
-        local overlap = Session.boxOverlapsSolid
-
-        local curX, curY = s.x, s.y
-        local overlapsNow = overlap and overlap(curX, curY) == true
-
-        if hx ~= 0 then
-            local movedX = (curX - preX) * hx
-            local aheadX = overlap and overlap(preX + hx * 0.2, preY) == true
-            if movedX < minMove and (overlapsNow or aheadX or gn.active) then
-                gn.active = true
-                gn.x = math.clamp((gn.x or preX) + hx * speed * dt, 0.35, w.w - 0.35)
-                writeStatePos(gn.x, nil, false)
-            else
-                gn.x = curX
-            end
-        elseif gn.active then
-            writeStatePos(gn.x or preX, nil, false)
-        else
-            gn.x = curX
-        end
-
-        local evalX = gn.x or curX
-        if hy ~= 0 then
-            local movedY = (curY - preY) * hy
-            local aheadY = overlap and overlap(evalX, preY + hy * 0.2) == true
-            local stuckY = (hy > 0 and s.grounded) or (hy < 0 and math.abs(s.vy or 0) < 0.05)
-            if movedY < minMove and (overlapsNow or aheadY or stuckY or gn.active) then
-                gn.active = true
-                gn.hover = true
-                gn.y = math.clamp((gn.y or preY) + hy * speed * dt, 0.96, w.h - 0.05)
-                writeStatePos(nil, gn.y, true)
-            else
-                gn.y = curY
-                gn.hover = false
-            end
-        elseif gn.active then
-            writeStatePos(nil, gn.y or preY, true)
-        elseif gn.hover or ((curY - preY) > 0.015 and not s.grounded) then
-            gn.hover = true
-            gn.y = gn.y or preY
-            writeStatePos(nil, gn.y, true)
-        else
-            gn.y = curY
-        end
-
-        if gn.active and hx == 0 and hy == 0 then
-            local inside = overlap and overlap(gn.x or s.x, gn.y or s.y) == true
-            if not inside then
-                gn.active = false
-                if not gn.hover then resetNoclip() end
-            end
-        end
+        if Session.stepPathGlide then Session.stepPathGlide() end
     end))
 end)() end
 
@@ -3734,25 +3427,421 @@ function Session.boxOverlapsSolid(px, py)
     return false
 end
 
-function Session.checkGhostPosition()
-    local s = playerState()
-    if not s then return nil end
-    local hit = Session.boxOverlapsSolid(s.x, s.y)
-    if hit == nil then return nil end
-    if hit then
-        return false, "Your character still overlaps a block. Move into open space and turn it off again."
-    end
-    if math.abs(s.vx or 0) > 0.1 or math.abs(s.vy or 0) > 0.1 then
-        return false, "Release movement controls and wait for your character to stop before turning Fly off."
-    end
-    return true
-end
-
 -- Hazardous tile (lava, spikes, laser)
 local function hazardAt(x, y)
     local it = fgItemAt(x, y)
     return it ~= nil and (it.deadly or it.hurts or it.laser) and true or false
 end
+
+-- Safe open-air pathfinding + click/tap glide (never passes through solid or hazardous tiles)
+do (function()
+    local guiSvc = game:GetService("GuiService")
+    local floor, abs, sqrt = math.floor, math.abs, math.sqrt
+    local pg = {
+        active = false,
+        path = nil,
+        idx = 1,
+        gx = nil,
+        gy = nil,
+        curX = nil,
+        curY = nil,
+        lastT = 0,
+        rollbacks = 0,
+        wroteOnce = false,
+        world = nil,
+        fg = nil,
+    }
+    Session.PathGlide = pg
+
+    local function canPassAir(x, y)
+        local w = Refs.World
+        if not w or x < 0 or y < 0 or x >= w.w or y >= w.h then return false end
+        if solidAt(x, y) or hazardAt(x, y) then return false end
+        return Session.boxOverlapsSolid(x + 0.5, y + 0.999) == false
+    end
+
+    local function boxHazards(px, py)
+        for ty = floor(py - 0.95), floor(py - 0.0001) do
+            for tx = floor(px - 0.3), floor(px + 0.3 - 0.0001) do
+                if hazardAt(tx, ty) then return true end
+            end
+        end
+        return false
+    end
+
+    local function pointSafe(px, py)
+        return Session.boxOverlapsSolid(px, py) == false and not boxHazards(px, py)
+    end
+
+    local function segmentSafe(x0, y0, x1, y1)
+        local dx, dy = x1 - x0, y1 - y0
+        local dist = sqrt(dx * dx + dy * dy)
+        local steps = math.max(1, math.ceil(dist / 0.22))
+        for i = 1, steps do
+            local t = i / steps
+            if not pointSafe(x0 + dx * t, y0 + dy * t) then return false end
+        end
+        return true
+    end
+
+    local function findAirPath(startPosX, startPosY, sx, sy, gx, gy)
+        local w = Refs.World
+        if not w or type(w.w) ~= "number" or type(w.h) ~= "number" or not Session.ItemDBSource then
+            return nil, "World or item data is not ready"
+        end
+        if gx < 0 or gy < 0 or gx >= w.w or gy >= w.h then return nil, "Target is outside the world" end
+        if not canPassAir(gx, gy) then
+            if gy > 0 and canPassAir(gx, gy - 1) then
+                gy = gy - 1
+            else
+                return nil, "Target tile is solid or blocked"
+            end
+        end
+
+        sx = math.clamp(sx, 0, w.w - 1)
+        sy = math.clamp(sy, 0, w.h - 1)
+        if not canPassAir(sx, sy) then
+            local bestX, bestY, bestD = nil, nil, math.huge
+            for _, d in ipairs({ { 0, -1 }, { -1, 0 }, { 1, 0 }, { 0, 1 } }) do
+                local nx, ny = sx + d[1], sy + d[2]
+                if canPassAir(nx, ny) and segmentSafe(startPosX, startPosY, nx + 0.5, ny + 0.999) then
+                    local dist = abs(nx - gx) + abs(ny - gy)
+                    if dist < bestD then bestX, bestY, bestD = nx, ny, dist end
+                end
+            end
+            if not bestX then return nil, "Character is inside a blocked tile" end
+            sx, sy = bestX, bestY
+        end
+
+        local width = w.w
+        local startKey = sy * width + sx
+        local goalKey = gy * width + gx
+        if startKey == goalKey then
+            local pt = { x = gx + 0.5, y = gy + 0.999, tx = gx, ty = gy }
+            if not segmentSafe(startPosX, startPosY, pt.x, pt.y) then
+                return nil, "Blocked ahead"
+            end
+            return { pt }, gx, gy
+        end
+
+        local heap, heapF = {}, {}
+        local function push(k, f)
+            local i = #heap + 1
+            heap[i], heapF[i] = k, f
+            while i > 1 do
+                local p = i // 2
+                if heapF[p] <= heapF[i] then break end
+                heap[p], heap[i] = heap[i], heap[p]
+                heapF[p], heapF[i] = heapF[i], heapF[p]
+                i = p
+            end
+        end
+        local function pop()
+            local top = heap[1]
+            local n = #heap
+            heap[1], heapF[1] = heap[n], heapF[n]
+            heap[n], heapF[n] = nil, nil
+            n -= 1
+            local i = 1
+            while true do
+                local l, r, sm = i * 2, i * 2 + 1, i
+                if l <= n and heapF[l] < heapF[sm] then sm = l end
+                if r <= n and heapF[r] < heapF[sm] then sm = r end
+                if sm == i then break end
+                heap[i], heap[sm] = heap[sm], heap[i]
+                heapF[i], heapF[sm] = heapF[sm], heapF[i]
+                i = sm
+            end
+            return top
+        end
+
+        local function hCost(x, y)
+            local dx, dy = abs(x - gx), abs(y - gy)
+            return math.max(dx, dy) + 0.41421356 * math.min(dx, dy)
+        end
+
+        local gScore, parent, closed = { [startKey] = 0 }, {}, {}
+        push(startKey, hCost(sx, sy))
+        local dirs = {
+            { 1, 0, 1 }, { -1, 0, 1 }, { 0, 1, 1 }, { 0, -1, 1 },
+            { 1, 1, 1.41421356 }, { 1, -1, 1.41421356 }, { -1, 1, 1.41421356 }, { -1, -1, 1.41421356 },
+        }
+        local found, expanded = false, 0
+        while #heap > 0 and expanded < 16000 do
+            local cur = pop()
+            if cur == goalKey then found = true break end
+            if not closed[cur] then
+                closed[cur] = true
+                expanded += 1
+                local cx, cy = cur % width, cur // width
+                local cg = gScore[cur]
+                for _, d in ipairs(dirs) do
+                    local dx, dy, stepCost = d[1], d[2], d[3]
+                    local nx, ny = cx + dx, cy + dy
+                    if canPassAir(nx, ny) and (dx == 0 or dy == 0 or (canPassAir(cx + dx, cy) and canPassAir(cx, cy + dy))) then
+                        local nk = ny * width + nx
+                        if not closed[nk] then
+                            local ng = cg + stepCost
+                            if not gScore[nk] or ng < gScore[nk] then
+                                gScore[nk] = ng
+                                parent[nk] = cur
+                                push(nk, ng + hCost(nx, ny))
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        if not found then return nil, "No safe open path to target (blocked by walls)" end
+
+        local rev = {}
+        local k = goalKey
+        while k and k ~= startKey do
+            rev[#rev + 1] = { x = (k % width) + 0.5, y = (k // width) + 0.999, tx = k % width, ty = k // width }
+            k = parent[k]
+        end
+        local raw = {}
+        for i = #rev, 1, -1 do raw[#raw + 1] = rev[i] end
+
+        -- String-pull consecutive nodes when the full hitbox sweep is clear.
+        local smooth = {}
+        local anchorX, anchorY, i = startPosX, startPosY, 1
+        while i <= #raw do
+            local furthest = i
+            local maxLook = math.min(#raw, i + 24)
+            for j = maxLook, i + 1, -1 do
+                if segmentSafe(anchorX, anchorY, raw[j].x, raw[j].y) then
+                    furthest = j
+                    break
+                end
+            end
+            local chosen = raw[furthest]
+            smooth[#smooth + 1] = chosen
+            anchorX, anchorY = chosen.x, chosen.y
+            i = furthest + 1
+        end
+        return smooth, gx, gy
+    end
+
+    local function stopGlide(reason, warnUser)
+        pg.active = false
+        pg.path = nil
+        pg.idx = 1
+        pg.gx, pg.gy = nil, nil
+        pg.curX, pg.curY = nil, nil
+        pg.rollbacks = 0
+        pg.wroteOnce = false
+        pg.world, pg.fg = nil, nil
+        if warnUser and reason then notify("Path Glide", reason, 3) end
+    end
+    Session.stopPathGlide = stopGlide
+
+    local function startGlideTo(tx, ty)
+        local w = Refs.World
+        local s = Session.readState and Session.readState()
+        if not w or not s or type(w.fg) ~= "table" then
+            notify("Path Glide", "Enter a world and connect to the game first", 3)
+            return
+        end
+        local sx, sy = floor(s.x), floor(s.y - 0.001)
+        local path, fx, fy = findAirPath(s.x, s.y, sx, sy, tx, ty)
+        if not path then
+            notify("Path Glide", fx or "No safe path", 2.5)
+            return
+        end
+        if not Session.writeStatePos or not Session.writeStatePos(s.x, s.y, true) then
+            notify("Path Glide", "Position control is unavailable on this executor", 4)
+            return
+        end
+        pg.path = path
+        pg.idx = 1
+        pg.gx, pg.gy = fx, fy
+        pg.curX, pg.curY = s.x, s.y
+        pg.lastT = os.clock()
+        pg.rollbacks = 0
+        pg.wroteOnce = false
+        pg.world, pg.fg = w, w.fg
+        pg.active = true
+    end
+
+    local function isGuiBlocked(x, y)
+        local okCg, coreGui = pcall(game.GetService, game, "CoreGui")
+        if okCg and coreGui then
+            local inset = guiSvc:GetGuiInset()
+            local cx, cy = x + inset.X, y + inset.Y
+            for _, sg in ipairs(coreGui:GetChildren()) do
+                if sg:IsA("ScreenGui") and sg.Enabled then
+                    local px, py = sg.IgnoreGuiInset and cx or x, sg.IgnoreGuiInset and cy or y
+                    for _, ch in ipairs(sg:GetChildren()) do
+                        if ch:IsA("GuiObject") and ch.Visible then
+                            local ap, as = ch.AbsolutePosition, ch.AbsoluteSize
+                            if as.X > 0 and as.Y > 0 and px >= ap.X and px <= ap.X + as.X and py >= ap.Y and py <= ap.Y + as.Y then
+                                return true
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        local gg = PlayerGui:FindFirstChild("GameGui")
+        local worldGui = gg and gg:FindFirstChild("World")
+        local cam = worldGui and worldGui:FindFirstChild("Camera")
+        local tiles = cam and cam:FindFirstChild("Tiles")
+        for _, obj in ipairs(PlayerGui:GetGuiObjectsAtPosition(x, y)) do
+            local sg = obj:FindFirstAncestorWhichIsA("ScreenGui")
+            if sg and sg.Name:sub(1, 4) == "n4th" then return true end
+            if obj:FindFirstAncestor("TouchGui") then return true end
+            if (obj:IsA("GuiButton") or obj:IsA("TextBox") or obj:IsA("ScrollingFrame"))
+                and obj ~= gg and obj ~= worldGui and obj ~= cam and obj ~= tiles then
+                return true
+            end
+        end
+        return false
+    end
+
+    local function screenPosToTile(screenX, screenY)
+        local v = getView()
+        if not v then return nil end
+        local pos = Vector2.new(screenX, screenY)
+        local gg = PlayerGui:FindFirstChild("GameGui")
+        if gg and gg:IsA("ScreenGui") and gg.IgnoreGuiInset then
+            pos = pos + guiSvc:GetGuiInset()
+        end
+        local rel = pos - v.tiles.AbsolutePosition
+        return floor(rel.X / v.ts) + State.CalibX, floor(rel.Y / v.ts) + State.CalibY
+    end
+
+    local touchStart = nil
+    table.insert(Connections, UserInputService.InputBegan:Connect(function(input)
+        if not alive() or not Misc.PathGlide or AutoInput.active or WorldFinder.Busy then return end
+        if os.clock() - (Session.PathGlideArmedAt or 0) < 0.25 then return end
+        if UserInputService:GetFocusedTextBox() then return end
+        if input.UserInputType == Enum.UserInputType.MouseButton2 then
+            if pg.active then stopGlide() end
+            return
+        end
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            local x, y = input.Position.X, input.Position.Y
+            if isGuiBlocked(x, y) then return end
+            local tx, ty = screenPosToTile(x, y)
+            if tx and ty then startGlideTo(tx, ty) end
+        elseif input.UserInputType == Enum.UserInputType.Touch then
+            local x, y = input.Position.X, input.Position.Y
+            if not isGuiBlocked(x, y) then
+                touchStart = { input = input, x = x, y = y, at = os.clock() }
+            end
+        end
+    end))
+
+    table.insert(Connections, UserInputService.InputEnded:Connect(function(input)
+        if not touchStart or input ~= touchStart.input then return end
+        local info = touchStart
+        touchStart = nil
+        if not alive() or not Misc.PathGlide or AutoInput.active or WorldFinder.Busy then return end
+        if os.clock() - info.at > 0.35 then return end
+        local dx, dy = input.Position.X - info.x, input.Position.Y - info.y
+        if dx * dx + dy * dy > 196 then return end
+        if not isGuiBlocked(input.Position.X, input.Position.Y) then
+            local tx, ty = screenPosToTile(input.Position.X, input.Position.Y)
+            if tx and ty then startGlideTo(tx, ty) end
+        end
+    end))
+
+    function Session.preRenderPathGlide()
+        if not pg.active then return end
+        if not Misc.PathGlide or AutoInput.active or WorldFinder.Busy then
+            stopGlide()
+            return
+        end
+        if pg.curX and pg.curY and Session.writeStatePos then
+            Session.writeStatePos(pg.curX, pg.curY, true)
+        end
+    end
+
+    local function manualMoveHeld()
+        if UserInputService:GetFocusedTextBox() then return false end
+        for _, kc in ipairs({ Enum.KeyCode.A, Enum.KeyCode.D, Enum.KeyCode.W, Enum.KeyCode.S,
+            Enum.KeyCode.Left, Enum.KeyCode.Right, Enum.KeyCode.Up, Enum.KeyCode.Down, Enum.KeyCode.Space }) do
+            if UserInputService:IsKeyDown(kc) then return true end
+        end
+        return false
+    end
+
+    function Session.stepPathGlide()
+        if not pg.active then return end
+        if not Misc.PathGlide or AutoInput.active or WorldFinder.Busy or manualMoveHeld() then
+            stopGlide()
+            return
+        end
+        local w = Refs.World
+        local s = Session.readState and Session.readState()
+        if not w or not s or w ~= pg.world or w.fg ~= pg.fg then
+            stopGlide()
+            return
+        end
+        local now = os.clock()
+        local dt = math.clamp(now - (pg.lastT or now), 1 / 240, 0.05)
+        pg.lastT = now
+
+        if pg.wroteOnce then
+            local errDist = sqrt((s.x - pg.curX) ^ 2 + (s.y - pg.curY) ^ 2)
+            if errDist > 2.2 then
+                pg.rollbacks += 1
+                pg.curX, pg.curY = s.x, s.y
+                if pg.rollbacks >= 2 then
+                    stopGlide("Server rolled back movement. Lower Glide speed if needed.", true)
+                    return
+                end
+            else
+                pg.rollbacks = 0
+            end
+        end
+
+        local curX, curY = pg.curX or s.x, pg.curY or s.y
+        local budget = math.clamp(tonumber(Misc.GlideSpeed) or 18, 6, 40) * dt
+        while budget > 1e-4 and pg.path and pg.idx <= #pg.path do
+            local wp = pg.path[pg.idx]
+            local dx, dy = wp.x - curX, wp.y - curY
+            local dist = sqrt(dx * dx + dy * dy)
+            if dist <= budget then
+                if not segmentSafe(curX, curY, wp.x, wp.y) then
+                    local newPath = pg.gx and findAirPath(curX, curY, floor(curX), floor(curY - 0.001), pg.gx, pg.gy)
+                    if not newPath then
+                        stopGlide("Path blocked ahead, stopped.", true)
+                        return
+                    end
+                    pg.path, pg.idx = newPath, 1
+                    break
+                end
+                curX, curY = wp.x, wp.y
+                budget -= dist
+                pg.idx += 1
+            else
+                local ratio = budget / dist
+                local nx, ny = curX + dx * ratio, curY + dy * ratio
+                if not segmentSafe(curX, curY, nx, ny) then
+                    local newPath = pg.gx and findAirPath(curX, curY, floor(curX), floor(curY - 0.001), pg.gx, pg.gy)
+                    if not newPath then
+                        stopGlide("Path blocked ahead, stopped.", true)
+                        return
+                    end
+                    pg.path, pg.idx = newPath, 1
+                    break
+                end
+                curX, curY = nx, ny
+                budget = 0
+            end
+        end
+
+        if pg.path and pg.idx > #pg.path then
+            Session.writeStatePos(curX, curY, false)
+            stopGlide()
+        else
+            pg.curX, pg.curY, pg.wroteOnce = curX, curY, true
+            Session.writeStatePos(curX, curY, true)
+        end
+    end
+end)() end
 
 local function platformAt(x, y)
     local it = fgItemAt(x, y)
@@ -4964,10 +5053,7 @@ local function autoBegin()
     AutoInput.active = true
     releaseInput()
     Reach = nil
-    if Misc.Ghost then
-        setGhost(false) -- fly disabled (triggers rollback)
-        if UI.GhostToggle then pcall(function() UI.GhostToggle:Set(false) end) end
-    end
+    if Session.stopPathGlide then Session.stopPathGlide() end
 end
 
 local function autoEnd()
@@ -10378,49 +10464,6 @@ task.spawn(function()
     end
 end)
 
--- Fly UP/DN buttons (shown when Fly is enabled)
-local FlyPad = newScreenGui("n4thFlyPad")
-UI.FlyPad = FlyPad
-
-local function flyButton(text, yOffset, onHold)
-    local b = Instance.new("TextButton")
-    b.Size = UDim2.fromOffset(64, 64)
-    b.AnchorPoint = Vector2.new(1, 0.5)
-    b.Position = UDim2.new(1, -24, 0.5, yOffset)
-    b.BackgroundColor3 = UI.Palette.Panel
-    b.BackgroundTransparency = 0.2
-    b.Text = text
-    b.Font = Enum.Font.GothamBold
-    b.TextSize = 18
-    b.TextColor3 = Color3.new(1, 1, 1)
-    b.AutoButtonColor = true
-    b.Parent = FlyPad
-    Instance.new("UICorner", b).CornerRadius = UDim.new(1, 0)
-    local st = Instance.new("UIStroke", b)
-    st.Color = UI.Palette.Border
-    st.Thickness = 2
-    -- release when finger lifts (even after dragging outside) so it never gets stuck
-    local heldInput = nil
-    b.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.Touch
-            or input.UserInputType == Enum.UserInputType.MouseButton1 then
-            heldInput = input
-            onHold(true)
-        end
-    end)
-    table.insert(Connections, UserInputService.InputEnded:Connect(function(input)
-        if heldInput and (input == heldInput
-            or (input.UserInputType == Enum.UserInputType.MouseButton1
-                and heldInput.UserInputType == Enum.UserInputType.MouseButton1)) then
-            heldInput = nil
-            onHold(false)
-        end
-    end))
-    return b
-end
-
-flyButton("UP", -40, function(v) Misc.UpHeld = v end)
-flyButton("DN", 40, function(v) Misc.DownHeld = v end)
 end)() end
 
 ---------------------------------------------------------------------
@@ -16828,7 +16871,7 @@ function Session.refreshGameRefs(show)
     pcall(Anim.findFast)
     if State.LiteMode then setLite(true) end
     if Misc.InfJump then hookJammer() end
-    if Misc.Ghost and Refs.World then Refs.World.ghost = true end
+    if Session.stopPathGlide then Session.stopPathGlide() end
     if Misc.Speed ~= 100 and Refs.World then Refs.World.speedScale = Misc.Speed / 100 end
     pcall(function() UI.RefInfo:SetDesc(refsText()) end)
     updateStatus()
@@ -17066,13 +17109,20 @@ do
     end)
 
     safe(function()
-        UI.GhostToggle = character:Toggle({
-            Title = "Fly + Noclip",
-            Desc = "Use UP/DN to fly. Move into open space before turning it off. Passing through blocks can trigger a kick.",
+        UI.PathGlideToggle = character:Toggle({
+            Title = "Click Path Glide",
+            Desc = "Click or tap any open space to glide along a safe non-solid path. Right-click or move keys cancel.",
             Value = false,
-            Callback = function(on) setGhost(on, true) end,
+            Callback = function(on) setPathGlide(on) end,
         })
     end)
+
+    addNumber(character, {
+        Title = "Glide speed (tiles/s)",
+        Desc = "Recommended: 14-22 (lower if the server rolls you back)",
+        Min = 6, Max = 40, Step = 2, Default = Misc.GlideSpeed,
+        Callback = function(v) Misc.GlideSpeed = math.clamp(math.floor(v), 6, 40) end,
+    })
 
     safe(function()
         effects:Toggle({
@@ -17338,12 +17388,11 @@ Session.Cleanup = function()
     if menu and OrigIsDown and rawget(menu, "isDown") == isDownWrapper then
         pcall(rawset, menu, "isDown", OrigIsDown)
     end
+    pcall(setPathGlide, false)
     if Refs.World then
-        if Misc.Ghost then pcall(function() Refs.World.ghost = false end) end
         if Misc.Speed ~= 100 then pcall(function() Refs.World.speedScale = 1 end) end
     end
     pcall(function() UI.GridGui:Destroy() end)
-    pcall(function() UI.FlyPad:Destroy() end)
     pcall(function() Window:Destroy() end)
 end
 
