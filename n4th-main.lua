@@ -9,7 +9,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = legacy versi
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-14-noclip-guard-2"
+Session.Build = "2026-11-14-finder-rejoin-drop-1"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -962,7 +962,7 @@ local Factory = {
     BreakSec = 60,       -- duration of 1 break session before checking trees again
     Drop = true,
     Keep = 50,           -- seeds to keep for replanting
-    DropAt = 200,        -- drop when seed count reaches this amount
+    DropAt = 190,        -- drop when seed count reaches this amount (clamped to CAP = 190)
     DropWorld = "",      -- "" = current world | "WORLD" | "WORLD:ID"
     DropX = -1, DropY = -1,
     Harvested = 0,
@@ -6762,8 +6762,9 @@ local function factoryBreak(o)
             local acts = State.Placed + State.Broken
             if acts ~= lastActs then lastActs, lastActAt = acts, os.clock() end
             -- keep breaking until blocks run out (no session timer)
+            local dropAt = math.min(Factory.DropAt, CAP)
             if not o.live() or sd >= CAP
-                or (o.drop and Factory.Drop and sd >= Factory.DropAt)
+                or (o.drop and Factory.Drop and Factory.pointSet() and sd >= dropAt and sd > Factory.Keep)
                 or (o.breakMode ~= "always" and sd >= BOOT_SEEDS)
                 or os.clock() - lastActAt > 8 then -- 8 seconds without place / punch: don't stall here
                 State.Running = false
@@ -6984,13 +6985,20 @@ do
         if UI.applyGrid then UI.applyGrid() end
     end
 
+    local function autoDropThreshold(id)
+        if Factory.Running and (id == Factory.SeedId or id == Factory.BlockId) then
+            return Factory.WaitingFull and 170 or 190
+        end
+        return 200
+    end
+
     function AutoDrop.fullItems()
         local items, seen = {}, {}
         local building = Build.DirtRun
         for _, id in ipairs(AutoDrop.Items) do
             if type(id) == "number" and not seen[id] and (not building or id ~= building.block) then
                 seen[id] = true
-                if invCount(id) >= 200 then items[#items + 1] = id end
+                if invCount(id) >= autoDropThreshold(id) then items[#items + 1] = id end
             end
         end
         return items
@@ -7188,17 +7196,33 @@ do
     end
 
     function AutoDrop.trip(items)
+        if State.Running and not State.Override and farmMode() ~= "Place only" then
+            AutoDrop.Status = "Finishing current farm cycle before drop"
+            State.DropYield, State.DropYieldWait = true, true
+        end
+        local settleDeadline = os.clock() + 2
         local state = playerState()
+        while alive() and AutoDrop.On and Guard.Mode == "idle" and os.clock() < settleDeadline do
+            if state and not state.dead and state.grounded and not AutoInput.collectOwner then
+                local cx, cy = startNode(state)
+                if openAt(cx, cy) and realSupport(cx, cy) then break end
+            end
+            task.wait(0.05)
+            state = playerState()
+        end
         if not state or state.dead or not state.grounded or AutoInput.collectOwner then
+            State.DropYield, State.DropYieldWait = false, false
             AutoDrop.Status = "Waiting for the character to return to a stable farm tile"
             return
         end
         if not Session.bindMovement(true) then
+            State.DropYield, State.DropYieldWait = false, false
             AutoDrop.Status = "Game movement controls not found"
             return
         end
         local hx, hy = startNode(state)
         if not openAt(hx, hy) or not realSupport(hx, hy) then
+            State.DropYield, State.DropYieldWait = false, false
             AutoDrop.Status = "Waiting for the character to return to a stable farm tile"
             return
         end
@@ -7210,6 +7234,8 @@ do
         local token = Guard.Token
         local x, y, facing = AutoDrop.X, AutoDrop.Y, AutoDrop.Facing
         local saved = Guard.snapshot()
+        local minCounts = {}
+        for _, id in ipairs(items) do minCounts[id] = autoDropThreshold(id) end
         AutoDrop.Busy, AutoDrop.Cancelled, AutoDrop.Saved = true, false, saved
         local function sameWorld()
             return alive() and not AutoDrop.Cancelled and Guard.Token == token and Guard.Mode == "idle"
@@ -7297,8 +7323,10 @@ do
             if not returnPath(facing) then failure = "Drop deferred because the stack would block the way back" return end
             for _, id in ipairs(items) do
                 if not canDrop() then break end
-                if table.find(AutoDrop.Items, id) and invCount(id) >= 200 then
-                    AutoDrop.Status = "Drop " .. itemName(id) .. " x200"
+                local minCount = minCounts[id] or 200
+                if table.find(AutoDrop.Items, id) and invCount(id) >= minCount then
+                    local dropCount = math.min(200, invCount(id))
+                    AutoDrop.Status = ("Drop %s x%d"):format(itemName(id), dropCount)
                     pcall(findDropRefs)
                     if #droppedZones > 0 and not returnPath(facing) then
                         failure = "Drop deferred because the stack would block the way back"
@@ -7308,7 +7336,7 @@ do
                     local origin = playerState()
                     if not origin or not canDrop() then break end
                     local dropX, dropY = origin.x + facing, origin.y - 0.475
-                    local got, reason = dropItems(id, 200, canDrop, false)
+                    local got, reason = dropItems(id, dropCount, canDrop, false)
                     AutoDrop.Dropped += got
                     if got > 0 then
                         pcall(findDropRefs)
@@ -7461,11 +7489,14 @@ end
 -- Returns: "drop" | "work" | "move" | "wait" | "break" | "next" | "idle" (+ seconds to ready tree)
 local function factoryStep(o)
     local seeds, blocks = invCount(o.seed), invCount(o.block)
+    local dropAt = math.min(Factory.DropAt, CAP)
+    local handledByAutoDrop = AutoDrop.On and table.find(AutoDrop.Items, o.seed) and AutoDrop.targetError() == nil
+    Factory.WaitingFull = false
     o.phase = o.phase or "harvest"
     Factory.Phase = PHASE_NAME[o.phase]
-    -- drop excess seeds (anytime)
-    if o.drop and Factory.Drop and seeds >= Factory.DropAt and seeds > Factory.Keep
-        and os.clock() >= (Factory.DropOffUntil or 0) then
+    -- drop excess seeds (anytime, unless Auto Drop handles this seed)
+    if o.drop and Factory.Drop and Factory.pointSet() and not handledByAutoDrop
+        and seeds >= dropAt and seeds > Factory.Keep and os.clock() >= (Factory.DropOffUntil or 0) then
         factoryDrop(o.seed, seeds - Factory.Keep, o.live)
         return "drop"
     end
@@ -7514,6 +7545,11 @@ local function factoryStep(o)
     end
 
     -- wait
+    if o.drop and Factory.Drop and Factory.pointSet() and not handledByAutoDrop
+        and seeds >= CAP - 20 and seeds > Factory.Keep and blocks == 0 and os.clock() >= (Factory.DropOffUntil or 0) then
+        factoryDrop(o.seed, seeds - Factory.Keep, o.live)
+        return "drop"
+    end
     local n, nxt = readyTreeCount(o.whole)
     if n > 0 and os.clock() - (o.idleAt or 0) > 5 then
         o.phase = "harvest"
@@ -7528,6 +7564,7 @@ local function factoryStep(o)
         o.phase = "plant"
         return "next"
     end
+    Factory.WaitingFull = seeds >= CAP - 20 or blocks >= CAP - 20
     return "idle", nxt, n
 end
 
@@ -13364,6 +13401,7 @@ do (function() -- isolated function: internal locals do not count toward the 200
         -- succeeds once world data switches to the new world (table swap or in-place reload)
         local t0 = os.clock()
         while alive() and os.clock() - t0 < 10 do
+            if WorldFinder.Busy and (not WorldFinder.Running or WorldFinder.Cancelled) then return false, "Stopped" end
             if WorldFinder.Busy and WorldFinder.Teleporting then return false, "Server transfer", true end
             local curW = Refs.World
             local curName = worldName()
@@ -13387,7 +13425,7 @@ do (function() -- isolated function: internal locals do not count toward the 200
             if live then return live() end
             return stillBack(token)
         end
-        if saved.world ~= "" and worldName() ~= saved.world then
+        if saved.world ~= "" and worldName():upper() ~= saved.world:upper() then
             notify("Guard", "World changed, activity will not resume", 5)
             return
         end
@@ -13398,7 +13436,19 @@ do (function() -- isolated function: internal locals do not count toward the 200
         if saved.build then
             if active() then Build.start(saved.build == "dirt") end
         elseif saved.factory or saved.pabrik then
-            if active() then Factory.start() end
+            if active() then
+                if not Factory.SeedId and type(saved.factorySeed) == "number" then Factory.SeedId = saved.factorySeed end
+                for _ = 1, 4 do
+                    Factory.start()
+                    if Factory.Running or not active() then break end
+                    task.wait(1.5)
+                    if active() then
+                        pcall(Anim.quickRefs)
+                        pcall(Session.bindMovement, true)
+                        pcall(Auto.findTreeRefs)
+                    end
+                end
+            end
         elseif saved.vend then
             if active() then Vend.start() end
         elseif saved.farm then
@@ -15535,7 +15585,7 @@ do (function()
 
     addNumber(pDrop, {
         Title = "Drop when seeds reach",
-        Desc = "Example 200 & keep 50 = drop 150",
+        Desc = "Max effective 190 (example 190 & keep 50 = drop 140)",
         Min = 2, Max = 200, Step = 1, Default = Factory.DropAt,
         Callback = function(v) Factory.DropAt = math.floor(v) end,
     })
@@ -15631,6 +15681,7 @@ do (function()
     local function savePending(world, saved)
         local target = (saved and saved.world ~= "" and saved.world) or world or ""
         if target == "" then return false end
+        if Config and type(Config.save) == "function" and not Config.Paused then pcall(Config.save, true) end
         local data = {
             world = target,
             farm = saved and saved.farm or false,
@@ -15640,6 +15691,7 @@ do (function()
             spam = saved and saved.spam or false,
             splice = saved and saved.splice or false,
             factory = saved and (saved.factory or saved.pabrik) or false,
+            factorySeed = (saved and saved.factorySeed) or Factory.SeedId or nil,
             build = saved and saved.build or false,
             tx = saved and saved.tx or nil,
             ty = saved and saved.ty or nil,
@@ -15653,6 +15705,14 @@ do (function()
         end
         local tpOk = pcall(TeleportService.SetTeleportSetting, TeleportService, TELEPORT_KEY, data)
         return wrote or tpOk
+    end
+
+    local function clearPending()
+        if canFile and type(delfile) == "function" then
+            local okE, has = pcall(isfile, PENDING)
+            if okE and has then pcall(delfile, PENDING) end
+        end
+        pcall(TeleportService.SetTeleportSetting, TeleportService, TELEPORT_KEY, false)
     end
 
     -- snapshot activity while still running
@@ -15679,6 +15739,19 @@ do (function()
     end
 
     local function resume(saved, reason)
+        if saved and not Factory.SeedId and type(saved.factorySeed) == "number" then
+            Factory.SeedId = saved.factorySeed
+        end
+        if hasSavedActivity(saved) then
+            local readyDeadline = os.clock() + 10
+            while alive() and os.clock() < readyDeadline do
+                local movedOk = Session.bindMovement(true)
+                local seedOk = not (saved.factory or saved.pabrik) or not Factory.SeedId or Auto.blockOfSeed(Factory.SeedId) ~= nil
+                if Auto.here() and movedOk and seedOk then break end
+                pcall(Anim.quickRefs)
+                task.wait(0.5)
+            end
+        end
         Guard.afterEnter()
         Rejoin.Count += 1
         if hasSavedActivity(saved) then
@@ -15736,6 +15809,7 @@ do (function()
         if Guard.Mode == "away" or Guard.Mode == "out" then return end -- Guard initiated the exit
         local saved = Rejoin.Last
         if saved and (saved.world == "" or os.clock() - Rejoin.LastAt > 60) then saved = nil end
+        if not saved and Guard.anyRunning() then saved = Guard.snapshot() end
         local target = (saved and saved.world ~= "" and saved.world) or Rejoin.targetWorld()
         if target == "" then target = Guard.worldName() end
         if target == "" then return end
@@ -15818,13 +15892,14 @@ do (function()
             task.wait(2)
             local out = Guard.worldName() == ""
             local free = Rejoin.On and Rejoin.Keep and not Rejoin.Busy and not Rejoin.Leaving and not Factory.Traveling
-                and not WorldFinder.Busy and Guard.Mode == "idle"
+                and not WorldFinder.Busy and os.clock() - (WorldFinder.EndedAt or 0) >= 10 and Guard.Mode == "idle"
             if not (out and free) then
                 outSince = nil
             else
                 outSince = outSince or os.clock()
                 local world = Rejoin.targetWorld()
-                if world ~= "" and os.clock() - outSince >= Rejoin.DelaySec then
+                -- Allow normal /warp transitions a few seconds to load before pulling back to LastWorld.
+                if world ~= "" and os.clock() - outSince >= math.max(8, Rejoin.DelaySec) then
                     outSince = nil
                     Rejoin.Busy = true
                     local saved = Rejoin.Last
@@ -15902,7 +15977,6 @@ do (function()
             local okE, has = pcall(isfile, PENDING)
             if okE and has then
                 local okR, raw = pcall(readfile, PENDING)
-                if type(delfile) == "function" then pcall(delfile, PENDING) end
                 if okR and type(raw) == "string" then
                     local okD, decoded = pcall(HttpService.JSONDecode, HttpService, raw)
                     if okD and type(decoded) == "table" then saved = decoded end
@@ -15913,10 +15987,12 @@ do (function()
             local okT, tpData = pcall(TeleportService.GetTeleportSetting, TeleportService, TELEPORT_KEY)
             if okT and type(tpData) == "table" then saved = tpData end
         end
-        pcall(TeleportService.SetTeleportSetting, TeleportService, TELEPORT_KEY, false)
-        if type(saved) ~= "table" or type(saved.world) ~= "string" or saved.world == "" then return end
-        if saved.user and saved.user ~= LocalPlayer.UserId then return end
-        if os.time() - (tonumber(saved.at) or 0) > 15 * 60 then return end -- expired
+        if type(saved) ~= "table" or type(saved.world) ~= "string" or saved.world == ""
+            or (saved.user and saved.user ~= LocalPlayer.UserId)
+            or os.time() - (tonumber(saved.at) or 0) > 15 * 60 then
+            clearPending()
+            return
+        end
         Rejoin.Busy = true
         Rejoin.Status = "Rejoin: waiting to enter " .. saved.world
         local t0 = os.clock()
@@ -15927,10 +16003,21 @@ do (function()
             if Refs.World and tries < 3 and os.clock() - lastTryAt >= 10 then
                 lastTryAt = os.clock()
                 tries += 1
-                Guard.enterWorld(saved.world)
+                local _, _, hopping = Guard.enterWorld(saved.world)
+                if hopping == true then
+                    -- Keep pending snapshot across lobby -> world server transfer.
+                    saved.at = os.time()
+                    savePending(saved.world, saved)
+                    local queued = queueScript()
+                    Rejoin.Status = "Server transfer to " .. saved.world .. "..." .. (queued and "" or " (script not queued)")
+                    Hook.send("rejoin", "Rejoin transfer to " .. saved.world)
+                    Rejoin.Busy = false
+                    return
+                end
             end
             task.wait(2)
         end
+        clearPending()
         if alive() and Guard.worldName():upper() == saved.world:upper() then
             pcall(reconnectFn)
             task.wait(1)
@@ -15959,6 +16046,31 @@ do
     -- Only persists Finder's own queue. Does not probe worlds externally.
     local teleport = game:GetService("TeleportService")
     local pendingKey = "n4th.finder.teleport.v1"
+    local stopFile = "n4thOpus/finder_stop_" .. tostring(LocalPlayer.UserId) .. ".txt"
+    local function writeStopMarker()
+        if type(writefile) ~= "function" then return end
+        if type(isfolder) == "function" and type(makefolder) == "function" then
+            local okF, has = pcall(isfolder, "n4thOpus")
+            if okF and not has then pcall(makefolder, "n4thOpus") end
+        end
+        pcall(writefile, stopFile, tostring(os.time()))
+    end
+    local function clearStopMarker()
+        if type(isfile) == "function" and type(delfile) == "function" then
+            local okE, has = pcall(isfile, stopFile)
+            if okE and has then pcall(delfile, stopFile) end
+        end
+    end
+    local function stopMarkerAt()
+        if type(isfile) == "function" and type(readfile) == "function" then
+            local okE, has = pcall(isfile, stopFile)
+            if okE and has then
+                local okR, raw = pcall(readfile, stopFile)
+                if okR then return tonumber(raw) or 0 end
+            end
+        end
+        return 0
+    end
     local bootSource = [=[
 local globals = (getgenv and getgenv()) or _G
 if not globals.__n4thFinderBooting then
@@ -15971,14 +16083,26 @@ if not globals.__n4thFinderBooting then
         local player = players.LocalPlayer
         local ts = game:GetService("TeleportService")
         local ok, data = pcall(ts.GetTeleportSetting, ts, "n4th.finder.teleport.v1")
+        local stoppedAt = 0
+        if player and type(isfile) == "function" and type(readfile) == "function" then
+            local stopPath = "n4thOpus/finder_stop_" .. tostring(player.UserId) .. ".txt"
+            local okE, has = pcall(isfile, stopPath)
+            if okE and has then
+                local okR, raw = pcall(readfile, stopPath)
+                if okR then stoppedAt = tonumber(raw) or 0 end
+            end
+        end
         local ran, err = true, nil
-        if ok and type(data) == "table" and data.Active == true and data.Schema == 1
+        if ok and type(data) == "table" and data.Active == true and data.Cancelled ~= true and data.Schema == 1
             and data.Universe == game.GameId and data.Job ~= game.JobId
             and player and data.User == player.UserId and type(data.At) == "number"
-            and os.time() - data.At >= 0 and os.time() - data.At < 600 then
+            and os.time() - data.At >= 0 and os.time() - data.At < 600
+            and stoppedAt < data.At - 3 then
             ran, err = pcall(function()
                 loadstring(game:HttpGet("https://raw.githubusercontent.com/ZennJxD/n4th/refs/heads/main/n4th"))()
             end)
+        elseif ok and type(data) == "table" and data.Active == true and player and stoppedAt >= (tonumber(data.At) or 0) - 3 then
+            pcall(ts.SetTeleportSetting, ts, "n4th.finder.teleport.v1", { Schema = 1, Active = false, Cancelled = true, At = os.time(), User = player.UserId })
         end
         globals.__n4thFinderBooting = nil
         if not ran then warn("[n4th] Failed to resume after teleport: " .. tostring(err)) end
@@ -15987,10 +16111,10 @@ end
 ]=]
 
     function WorldFinder.checkpoint(active)
-        local data = false
-        if active and WorldFinder.Queue then
+        local data = { Schema = 1, Active = false, Cancelled = WorldFinder.Cancelled == true, At = os.time(), User = LocalPlayer.UserId, Job = game.JobId }
+        if active and WorldFinder.Running and not WorldFinder.Cancelled and WorldFinder.Queue then
             data = {
-                Schema = 1, Active = true, At = os.time(), User = LocalPlayer.UserId,
+                Schema = 1, Active = true, Cancelled = false, At = os.time(), User = LocalPlayer.UserId,
                 Universe = game.GameId, Job = game.JobId,
                 Queue = table.clone(WorldFinder.Queue), Index = WorldFinder.Index,
                 Checked = WorldFinder.Checked, Found = WorldFinder.Found, Locked = WorldFinder.Locked,
@@ -16007,6 +16131,8 @@ end
     end
 
     function WorldFinder.armTeleport()
+        if not (WorldFinder.Running and not WorldFinder.Cancelled) then return false, "Stopped" end
+        clearStopMarker()
         local saved, reason = WorldFinder.checkpoint(true)
         if not saved then return false, "Failed to save teleport queue: " .. tostring(reason) end
         if WorldFinder.Queued then return true end
@@ -16022,21 +16148,29 @@ end
             if not alive() then return end
             if state == Enum.TeleportState.Failed then
                 WorldFinder.Teleporting, WorldFinder.Queued = false, false
-                if WorldFinder.Running then WorldFinder.log("Teleport failed. Waiting for world entry result.") end
-            elseif WorldFinder.Running and not WorldFinder.Cancelled and WorldFinder.Busy
-                and (state == Enum.TeleportState.Started or state == Enum.TeleportState.InProgress
-                    or state == Enum.TeleportState.WaitingForServer) then
-                WorldFinder.Teleporting = true
-                WorldFinder.log("Server teleport. Queue will resume once the game loads.")
-                local ok, err = WorldFinder.armTeleport()
-                if not ok then WorldFinder.log(err) end
+                if WorldFinder.Running and not WorldFinder.Cancelled then WorldFinder.log("Teleport failed. Waiting for world entry result.") end
+            elseif state == Enum.TeleportState.Started or state == Enum.TeleportState.InProgress
+                or state == Enum.TeleportState.WaitingForServer then
+                if WorldFinder.Running and not WorldFinder.Cancelled and WorldFinder.Busy then
+                    WorldFinder.Teleporting = true
+                    WorldFinder.log("Server teleport. Queue will resume once the game loads.")
+                    local ok, err = WorldFinder.armTeleport()
+                    if not ok then WorldFinder.log(err) end
+                elseif WorldFinder.Cancelled then
+                    WorldFinder.checkpoint(false)
+                end
             end
         end))
     end)
 
     function WorldFinder.startup(reconnectFn)
         local ok, data = pcall(teleport.GetTeleportSetting, teleport, pendingKey)
-        if not ok or type(data) ~= "table" or data.Active ~= true or data.Job == game.JobId then return false end
+        if not ok or type(data) ~= "table" or data.Active ~= true or data.Cancelled == true or data.Job == game.JobId then return false end
+        if stopMarkerAt() >= (tonumber(data.At) or 0) - 3 then
+            WorldFinder.Cancelled = true
+            WorldFinder.checkpoint(false)
+            return false
+        end
         local valid = data.Schema == 1 and data.Universe == game.GameId and data.User == LocalPlayer.UserId
             and type(data.At) == "number" and os.time() - data.At >= 0 and os.time() - data.At < 600
             and type(data.Queue) == "table" and #data.Queue > 0 and #data.Queue <= 500
@@ -16048,6 +16182,7 @@ end
         end
         WorldFinder.checkpoint(false) -- one-shot; start() creates a new checkpoint
         if not valid then WorldFinder.log("Teleport queue expired or invalid. Starting a new search.") return false end
+        clearStopMarker()
         local deadline = os.clock() + 45
         while alive() and os.clock() < deadline do
             if Session.Ready and Refs.World then return WorldFinder.start(nil, data) == true end
@@ -16264,8 +16399,13 @@ end
 
     function WorldFinder.stop()
         WorldFinder.Running = false
+        WorldFinder.Cancelled = true
+        WorldFinder.Teleporting = false
+        WorldFinder.Saved = nil
+        WorldFinder.EndedAt = os.clock()
+        writeStopMarker()
         WorldFinder.checkpoint(false)
-        if WorldFinder.Busy then WorldFinder.log("Stop requested. Waiting for active step to finish.") end
+        if WorldFinder.Busy then WorldFinder.log("Stop requested. Cancelling active step...") end
     end
 
     function WorldFinder.start(manual, pending)
@@ -16346,7 +16486,7 @@ end
                         WorldFinder.log("Found an unlocked world. Staying in " .. name .. ".")
                         break
                     end
-                    if index < #queue then
+                    if live() and index < #queue then
                         WorldFinder.Index = index + 1
                         WorldFinder.checkpoint(true)
                         local delay = math.max(5, tonumber(WorldFinder.DelaySec) or 8)
@@ -16357,6 +16497,7 @@ end
             end)
             local finished = live()
             WorldFinder.Running, WorldFinder.Busy, WorldFinder.Saved = false, false, nil
+            WorldFinder.EndedAt = os.clock()
             WorldFinder.checkpoint(false)
             local foundPreview = {}
             for index = 1, math.min(10, #WorldFinder.FoundNames) do foundPreview[#foundPreview + 1] = WorldFinder.FoundNames[index] end
