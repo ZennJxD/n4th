@@ -9976,6 +9976,7 @@ do (function()
         end))
     end
 
+    local TweenService = game:GetService("TweenService")
     local DiscordLib = {}
     local gui = create("ScreenGui", {
         Name = "N4TH_V2",
@@ -9985,9 +9986,9 @@ do (function()
         ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
     }, PlayerGui)
 
-    local pfp = "https://www.roblox.com/headshot-thumbnail/image?userId=" .. tostring(LP.UserId) .. "&width=420&height=420&format=png"
-    local user = LP.Name
-    local tag = tostring((LP.UserId % 9000) + 1000)
+    local pfp = "https://www.roblox.com/headshot-thumbnail/image?userId=" .. tostring(LocalPlayer.UserId) .. "&width=420&height=420&format=png"
+    local user = LocalPlayer.Name
+    local tag = tostring((LocalPlayer.UserId % 9000) + 1000)
 
     function DiscordLib:Window(text)
         local currentServerToggled = ""
