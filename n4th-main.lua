@@ -9,7 +9,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = legacy versi
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-15-path-glide-view-1"
+Session.Build = "2026-11-15-pathfind-tp-1"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -860,8 +860,8 @@ local State = {
 local Misc = {
     Speed = 100,       -- walkspeed % (100 = normal)
     InfJump = false,
-    PathGlide = false, -- click/tap safe open-air path glide (replaces fly + noclip)
-    GlideSpeed = 18,   -- tiles per second along safe path
+    PathGlide = false, -- click/tap 1-click A* Pathfind TP (replaces slow glide)
+    TpDelay = 25,      -- delay (ms) between A* tile steps (0 = fastest, 25-60 = safer)
     CustomName = true,          -- name watermark (always on, removed only when script closes)
     NameText = "https://dsc.gg/nath",  -- watermark text
 }
@@ -1390,7 +1390,7 @@ State.PlaceMs = math.max(State.PlaceMs, 140)
 State.BreakMs = math.max(State.BreakMs, 200)
 Farmer.HarvestMs = math.max(Farmer.HarvestMs, 140)
 Farmer.PlantMs = math.max(Farmer.PlantMs, 140)
-Config.add("Misc", Misc, { "Speed", "GlideSpeed" })
+Config.add("Misc", Misc, { "Speed", "TpDelay" })
 Config.add("Chat", Spam, { "Texts", "IntervalSec" })
 Config.add("Land", Land, { "X0", "X1", "Y0" })
 Config.add("DirtFarm", Build.Dirt, { "X0", "X1", "Y0", "Y1", "Dig" })
@@ -2851,7 +2851,7 @@ local function setPathGlide(on)
     if on then
         Session.PathGlideArmedAt = os.clock()
         pcall(Session.bindMovement, true)
-        notify("Path Glide", "Click or tap any open space to glide there", 3)
+        notify("Pathfind TP", "Click or tap any open tile to Pathfind TP there", 3)
     elseif Session.stopPathGlide then
         Session.stopPathGlide()
     end
@@ -2948,7 +2948,7 @@ do (function()
             return nil
         end
         local ups = getUpvalues(Refs.State)
-        local xIdx, yIdx, gIdx, vxIdx, vyIdx
+        local xIdx, yIdx, gIdx, vxIdx, vyIdx, fIdx
         local xCount, yCount, vxCount, vyCount = 0, 0, 0, 0
         for idx, v in pairs(ups) do
             if type(idx) == "number" then
@@ -2965,9 +2965,12 @@ do (function()
                 vxIdx = yIdx + 1; vxCount = 1
                 vyIdx = yIdx + 2; vyCount = 1
             end
+            if yIdx and type(s.facing) == "number" and (s.facing == 1 or s.facing == -1) and ups[yIdx + 3] == s.facing then
+                fIdx = yIdx + 3
+            end
             stateFnRef = Refs.State
             stateUpIdx = {
-                x = xIdx, y = yIdx, grounded = gIdx,
+                x = xIdx, y = yIdx, grounded = gIdx, facing = fIdx,
                 vx = vxCount == 1 and vxIdx or nil,
                 vy = vyCount == 1 and vyIdx or nil,
             }
@@ -2976,14 +2979,15 @@ do (function()
         return nil
     end
 
-    function Session.writeStatePos(px, py, clearGround)
+    function Session.writeStatePos(px, py, clearGround, facing, vx, vy)
         local idx = bindStateUpvals()
         if not idx or not Refs.State then return false end
         if px then pcall(setUp, Refs.State, idx.x, px) end
         if py then pcall(setUp, Refs.State, idx.y, py) end
         if clearGround and idx.grounded then pcall(setUp, Refs.State, idx.grounded, false) end
-        if idx.vx then pcall(setUp, Refs.State, idx.vx, 0) end
-        if idx.vy then pcall(setUp, Refs.State, idx.vy, 0) end
+        if idx.facing and (facing == 1 or facing == -1) then pcall(setUp, Refs.State, idx.facing, facing) end
+        if idx.vx then pcall(setUp, Refs.State, idx.vx, vx or 0) end
+        if idx.vy then pcall(setUp, Refs.State, idx.vy, vy or 0) end
         return true
     end
 
@@ -3444,25 +3448,56 @@ local function hazardAt(x, y)
     return it ~= nil and (it.deadly or it.hurts or it.laser) and true or false
 end
 
--- Safe open-air pathfinding + click/tap glide (never passes through solid or hazardous tiles)
+-- Safe A* Pathfind TP (1-click tile-by-tile packet teleport, never passes through solid or hazardous tiles)
 do (function()
     local guiSvc = game:GetService("GuiService")
     local floor, abs, sqrt = math.floor, math.abs, math.sqrt
     local pg = {
         active = false,
-        path = nil,
-        idx = 1,
+        token = 0,
         gx = nil,
         gy = nil,
         curX = nil,
         curY = nil,
-        lastT = 0,
+        facing = 1,
         rollbacks = 0,
         wroteOnce = false,
         world = nil,
         fg = nil,
     }
     Session.PathGlide = pg
+    local lastPacketT = -1
+
+    local function groundBelow(tx, ty)
+        if solidAt(tx, ty + 1) then return true end
+        local it = fgItemAt(tx, ty + 1)
+        return it ~= nil and it.platform == true
+    end
+
+    local function sendMovePacket(px, py, vx, vy, facing, grounded, s)
+        if not (NetOk and type(Net) == "table" and type(Net.move) == "table" and type(Net.move.send) == "function") then
+            return false
+        end
+        local flags = ((facing or 1) > 0 and 1 or 0)
+            + (grounded and 2 or 0)
+            + (s and s.dead and 4 or 0)
+            + (s and s.dancing and 8 or 0)
+            + (s and s.facepalm and 16 or 0)
+            + (s and s.hurt and 32 or 0)
+            + (s and s.raySpin and 64 or 0)
+            + (s and s.airJump and 128 or 0)
+        local t = floor(os.clock() * 1000) % 65535
+        if t == lastPacketT then t = (t + 1) % 65535 end
+        lastPacketT = t
+        return pcall(Net.move.send, {
+            x = px,
+            y = py,
+            vx = vx or 0,
+            vy = vy or 0,
+            flags = flags,
+            t = t,
+        })
+    end
 
     local function canPassAir(x, y)
         local w = Refs.World
@@ -3613,66 +3648,110 @@ do (function()
         end
         local raw = {}
         for i = #rev, 1, -1 do raw[#raw + 1] = rev[i] end
-
-        -- String-pull consecutive nodes when the full hitbox sweep is clear.
-        local smooth = {}
-        local anchorX, anchorY, i = startPosX, startPosY, 1
-        while i <= #raw do
-            local furthest = i
-            local maxLook = math.min(#raw, i + 24)
-            for j = maxLook, i + 1, -1 do
-                if segmentSafe(anchorX, anchorY, raw[j].x, raw[j].y) then
-                    furthest = j
-                    break
-                end
-            end
-            local chosen = raw[furthest]
-            smooth[#smooth + 1] = chosen
-            anchorX, anchorY = chosen.x, chosen.y
-            i = furthest + 1
-        end
-        return smooth, gx, gy
+        return raw, gx, gy
     end
 
     local function stopGlide(reason, warnUser)
+        pg.token += 1
         pg.active = false
-        pg.path = nil
-        pg.idx = 1
         pg.gx, pg.gy = nil, nil
         pg.curX, pg.curY = nil, nil
         pg.rollbacks = 0
         pg.wroteOnce = false
         pg.world, pg.fg = nil, nil
-        if warnUser and reason then notify("Path Glide", reason, 3) end
+        if warnUser and reason then notify("Pathfind TP", reason, 3) end
     end
     Session.stopPathGlide = stopGlide
+
+    local function runPathTp(path, startX, startY, fx, fy, startFacing, depth)
+        local w = Refs.World
+        if not w then return end
+        pg.token += 1
+        local token = pg.token
+        pg.gx, pg.gy = fx, fy
+        pg.curX, pg.curY = startX, startY
+        pg.facing = startFacing or 1
+        pg.rollbacks = 0
+        pg.wroteOnce = false
+        pg.world, pg.fg = w, w.fg
+        pg.active = true
+
+        task.spawn(function()
+            local prevX, prevY = startX, startY
+            local curFacing = startFacing or 1
+            local n = #path
+            for i = 1, n do
+                if not alive() or not pg.active or pg.token ~= token
+                   or not Misc.PathGlide or AutoInput.active or WorldFinder.Busy then
+                    return
+                end
+                local curW = Refs.World
+                if not curW or curW ~= pg.world or curW.fg ~= pg.fg then
+                    stopGlide()
+                    return
+                end
+                local wp = path[i]
+                if not segmentSafe(prevX, prevY, wp.x, wp.y) then
+                    if (depth or 0) < 2 and pg.gx then
+                        local repl = findAirPath(prevX, prevY, floor(prevX), floor(prevY - 0.001), pg.gx, pg.gy)
+                        if repl and #repl > 0 then
+                            runPathTp(repl, prevX, prevY, pg.gx, pg.gy, curFacing, (depth or 0) + 1)
+                            return
+                        end
+                    end
+                    stopGlide("Path blocked ahead, stopped.", true)
+                    return
+                end
+
+                local dx, dy = wp.x - prevX, wp.y - prevY
+                if dx > 0.02 then curFacing = 1 elseif dx < -0.02 then curFacing = -1 end
+                local isLast = (i == n)
+                local onFloor = isLast and groundBelow(wp.tx, wp.ty)
+                local destY = onFloor and (wp.ty + 1) or wp.y
+                local delayMs = math.clamp(math.floor(tonumber(Misc.TpDelay) or 25), 0, 150)
+                local dtSim = math.max(delayMs / 1000, 1 / 60)
+                local svx = isLast and 0 or math.clamp(dx / dtSim, -30, 30)
+                local svy = isLast and 0 or math.clamp(dy / dtSim, -30, 30)
+
+                pg.curX, pg.curY, pg.facing, pg.wroteOnce = wp.x, destY, curFacing, true
+                Session.writeStatePos(wp.x, destY, not onFloor, curFacing, 0, 0)
+                sendMovePacket(wp.x, destY, svx, svy, curFacing, onFloor, Session.readState())
+                prevX, prevY = wp.x, destY
+
+                if not isLast then
+                    if delayMs <= 0 then
+                        if i % 3 == 0 then RunService.Heartbeat:Wait() end
+                    elseif delayMs <= 12 then
+                        if i % 2 == 0 then RunService.Heartbeat:Wait() end
+                    else
+                        task.wait(delayMs / 1000)
+                    end
+                end
+            end
+            if pg.active and pg.token == token then
+                stopGlide()
+            end
+        end)
+    end
 
     local function startGlideTo(tx, ty)
         local w = Refs.World
         local s = Session.readState and Session.readState()
         if not w or not s or type(w.fg) ~= "table" then
-            notify("Path Glide", "Enter a world and connect to the game first", 3)
+            notify("Pathfind TP", "Enter a world and connect to the game first", 3)
             return
         end
         local sx, sy = floor(s.x), floor(s.y - 0.001)
         local path, fx, fy = findAirPath(s.x, s.y, sx, sy, tx, ty)
         if not path then
-            notify("Path Glide", fx or "No safe path", 2.5)
+            notify("Pathfind TP", fx or "No safe path", 2.5)
             return
         end
-        if not Session.writeStatePos or not Session.writeStatePos(s.x, s.y, true) then
-            notify("Path Glide", "Position control is unavailable on this executor", 4)
+        if not Session.writeStatePos or not Session.writeStatePos(s.x, s.y, true, s.facing or 1, 0, 0) then
+            notify("Pathfind TP", "Position control is unavailable on this executor", 4)
             return
         end
-        pg.path = path
-        pg.idx = 1
-        pg.gx, pg.gy = fx, fy
-        pg.curX, pg.curY = s.x, s.y
-        pg.lastT = os.clock()
-        pg.rollbacks = 0
-        pg.wroteOnce = false
-        pg.world, pg.fg = w, w.fg
-        pg.active = true
+        runPathTp(path, s.x, s.y, fx, fy, s.facing or 1, 0)
     end
 
     local function isGuiBlocked(x, y)
@@ -3750,7 +3829,7 @@ do (function()
             startGlideTo(tx, ty)
         elseif Refs.World == nil then
             lastTapAt = now
-            notify("Path Glide", "Enter a world and connect to the game first", 3)
+            notify("Pathfind TP", "Enter a world and connect to the game first", 3)
         end
     end
 
@@ -3799,8 +3878,27 @@ do (function()
             stopGlide()
             return
         end
+        local s = Session.readState and Session.readState()
+        local w = Refs.World
+        if not w or not s or w ~= pg.world or w.fg ~= pg.fg then
+            stopGlide()
+            return
+        end
+        if pg.wroteOnce and pg.curX and pg.curY then
+            local errDist = sqrt((s.x - pg.curX) ^ 2 + (s.y - pg.curY) ^ 2)
+            if errDist > 3.2 then
+                pg.rollbacks += 1
+                pg.curX, pg.curY = s.x, s.y
+                if pg.rollbacks >= 2 then
+                    stopGlide("Server rolled back TP. Increase TP step delay (ms).", true)
+                    return
+                end
+            else
+                pg.rollbacks = 0
+            end
+        end
         if pg.curX and pg.curY and Session.writeStatePos then
-            Session.writeStatePos(pg.curX, pg.curY, true)
+            Session.writeStatePos(pg.curX, pg.curY, true, pg.facing, 0, 0)
         end
     end
 
@@ -3818,73 +3916,6 @@ do (function()
         if not Misc.PathGlide or AutoInput.active or WorldFinder.Busy or manualMoveHeld() then
             stopGlide()
             return
-        end
-        local w = Refs.World
-        local s = Session.readState and Session.readState()
-        if not w or not s or w ~= pg.world or w.fg ~= pg.fg then
-            stopGlide()
-            return
-        end
-        local now = os.clock()
-        local dt = math.clamp(now - (pg.lastT or now), 1 / 240, 0.05)
-        pg.lastT = now
-
-        if pg.wroteOnce then
-            local errDist = sqrt((s.x - pg.curX) ^ 2 + (s.y - pg.curY) ^ 2)
-            if errDist > 2.2 then
-                pg.rollbacks += 1
-                pg.curX, pg.curY = s.x, s.y
-                if pg.rollbacks >= 2 then
-                    stopGlide("Server rolled back movement. Lower Glide speed if needed.", true)
-                    return
-                end
-            else
-                pg.rollbacks = 0
-            end
-        end
-
-        local curX, curY = pg.curX or s.x, pg.curY or s.y
-        local budget = math.clamp(tonumber(Misc.GlideSpeed) or 18, 6, 40) * dt
-        while budget > 1e-4 and pg.path and pg.idx <= #pg.path do
-            local wp = pg.path[pg.idx]
-            local dx, dy = wp.x - curX, wp.y - curY
-            local dist = sqrt(dx * dx + dy * dy)
-            if dist <= budget then
-                if not segmentSafe(curX, curY, wp.x, wp.y) then
-                    local newPath = pg.gx and findAirPath(curX, curY, floor(curX), floor(curY - 0.001), pg.gx, pg.gy)
-                    if not newPath then
-                        stopGlide("Path blocked ahead, stopped.", true)
-                        return
-                    end
-                    pg.path, pg.idx = newPath, 1
-                    break
-                end
-                curX, curY = wp.x, wp.y
-                budget -= dist
-                pg.idx += 1
-            else
-                local ratio = budget / dist
-                local nx, ny = curX + dx * ratio, curY + dy * ratio
-                if not segmentSafe(curX, curY, nx, ny) then
-                    local newPath = pg.gx and findAirPath(curX, curY, floor(curX), floor(curY - 0.001), pg.gx, pg.gy)
-                    if not newPath then
-                        stopGlide("Path blocked ahead, stopped.", true)
-                        return
-                    end
-                    pg.path, pg.idx = newPath, 1
-                    break
-                end
-                curX, curY = nx, ny
-                budget = 0
-            end
-        end
-
-        if pg.path and pg.idx > #pg.path then
-            Session.writeStatePos(curX, curY, false)
-            stopGlide()
-        else
-            pg.curX, pg.curY, pg.wroteOnce = curX, curY, true
-            Session.writeStatePos(curX, curY, true)
         end
     end
 end)() end
@@ -17174,18 +17205,18 @@ do
 
     safe(function()
         UI.PathGlideToggle = character:Toggle({
-            Title = "Click Path Glide",
-            Desc = "Click or tap any open space to glide along a safe non-solid path. Right-click or move keys cancel.",
+            Title = "Click Pathfind TP",
+            Desc = "Click or tap any open tile to A* Pathfind TP there. Right-click or move keys cancel.",
             Value = false,
             Callback = function(on) setPathGlide(on) end,
         })
     end)
 
     addNumber(character, {
-        Title = "Glide speed (tiles/s)",
-        Desc = "Recommended: 14-22 (lower if the server rolls you back)",
-        Min = 6, Max = 40, Step = 2, Default = Misc.GlideSpeed,
-        Callback = function(v) Misc.GlideSpeed = math.clamp(math.floor(v), 6, 40) end,
+        Title = "TP step delay (ms)",
+        Desc = "Delay per tile step (0 = fastest burst, 25-60 = safer against rollback)",
+        Min = 0, Max = 150, Step = 5, Default = Misc.TpDelay,
+        Callback = function(v) Misc.TpDelay = math.clamp(math.floor(v), 0, 150) end,
     })
 
     safe(function()
