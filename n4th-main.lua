@@ -856,8 +856,8 @@ local Misc = {
     Speed = 100,      -- walkspeed % (100 = normal)
     InfJump = false,
     Ghost = false,    -- fly + noclip through blocks
-    UpHeld = false,   -- on-screen ▲ button held
-    DownHeld = false, -- on-screen ▼ button held
+    UpHeld = false,   -- on-screen UP button held
+    DownHeld = false, -- on-screen DN button held
     CustomName = true,          -- name watermark (always on, removed only when script closes)
     NameText = "https://dsc.gg/nath",  -- watermark text
 }
@@ -869,7 +869,7 @@ local Clear = {
     UseBlock = true,          -- place scaffold block if there is no footing
     ScaffoldId = nil,         -- block used for scaffolding
     Collect = true,           -- collect drops after each break
-    Sweep = "Left → Right",   -- "Left → Right" or "Zig-zag"
+    Sweep = "Left -> Right",   -- "Left -> Right" or "Zig-zag"
     Skip = {},                -- temporarily skipped tiles
     TopRow = -1,              -- row currently being cleared
     DirRow = nil,             -- zig-zag direction for this row
@@ -1244,7 +1244,7 @@ do (function() -- isolated function: internal locals do not count toward the 200
         mvKey("Discord", "Pabrik", "Factory")
         mapVal("Farm", "Mode", { ["Break saja"] = "Break only", ["Place saja"] = "Place only" })
         mapVal("Farm", "CollectMode", { ["Sentuhan"] = "Touch" })
-        mapVal("Clear", "Sweep", { ["Kiri → Kanan"] = "Left → Right" })
+        mapVal("Clear", "Sweep", { ["Kiri \226\134\146 Kanan"] = "Left -> Right", ["Left \226\134\146 Right"] = "Left -> Right" })
         mapVal("Vending", "Mode", { ["Isi stock dari drop"] = "Stock from drops", ["Kosongkan sampai habis"] = "Empty until done" })
         mapVal("AutoDrop", "Facing", { ["Kanan"] = "Right", ["Kiri"] = "Left" })
         mapVal("WorldFinder", "Mode", { ["Campuran"] = "Mixed", ["3 Huruf"] = "3 letters", ["4 Huruf"] = "4 letters", ["Kata Indonesia"] = "Indonesian words", ["Daftar sendiri"] = "Custom list" })
@@ -2855,7 +2855,7 @@ local function setSpeed(pct)
 end
 
 -- Game movement keys are read from WorldMenu.isDown. Hooked so
--- Fly ▲/▼ buttons work, and Clear / Farmer can press virtual keys.
+-- Fly UP/DN buttons work, and Clear / Farmer can press virtual keys.
 local OrigIsDown = nil
 local function isDownWrapper(saved, key, ...)
     if AutoInput.active then
@@ -4859,7 +4859,7 @@ local function updateClearStatus()
     if not UI.ClearStatus and not UI.WorldBreakStatus then return end
     local txt = "Status   : " .. (Clear.Running and "RUNNING" or "STOPPED")
         .. "\nRow      : " .. (Clear.TopRow >= 0 and (Clear.TopRow .. "-" .. (Clear.TopRow + 1)) or "-")
-        .. "  | dir: " .. ((Clear.Dir == -1 and Clear.Sweep == "Zig-zag") and "right→left" or "left→right")
+        .. "  | dir: " .. ((Clear.Dir == -1 and Clear.Sweep == "Zig-zag") and "right->left" or "left->right")
         .. "\nBroken   : " .. Clear.Broken .. "  | collect: " .. State.Collected
         .. "\nLeft     : " .. (Clear.Remaining >= 0 and tostring(Clear.Remaining) or "-")
         .. "  | skipped: " .. skippedCount(Clear.Skip)
@@ -6418,7 +6418,7 @@ local function dropTrip(items, live, say)
     local home = Guard.worldName()
     if name == "" then name = home end
     if Factory.DropX < 0 and not door and name == home then
-        say("Drop point not set (Auto Drop → Shared drop point), drop skipped")
+        say("Drop point not set (Auto Drop -> Shared drop point), drop skipped")
         return false, "nopoint"
     end
     Factory.Traveling = true
@@ -9572,7 +9572,7 @@ table.insert(Connections, LocalPlayer.Idled:Connect(function()
 end))
 
 ---------------------------------------------------------------------
--- EXTRA GUI: 5x5 Tile Grid + Fly ▲/▼ buttons
+-- EXTRA GUI: 5x5 Tile Grid + Fly UP/DN buttons
 ---------------------------------------------------------------------
 do (function() -- Preserve main chunk registers for unoptimized bytecode compilation.
 local guiParent
@@ -9851,7 +9851,7 @@ task.spawn(function()
     end
 end)
 
--- Fly ▲/▼ buttons (shown when Fly is enabled)
+-- Fly UP/DN buttons (shown when Fly is enabled)
 local FlyPad = newScreenGui("n4thFlyPad")
 UI.FlyPad = FlyPad
 
@@ -9864,7 +9864,7 @@ local function flyButton(text, yOffset, onHold)
     b.BackgroundTransparency = 0.2
     b.Text = text
     b.Font = Enum.Font.GothamBold
-    b.TextSize = 28
+    b.TextSize = 18
     b.TextColor3 = Color3.new(1, 1, 1)
     b.AutoButtonColor = true
     b.Parent = FlyPad
@@ -9892,8 +9892,8 @@ local function flyButton(text, yOffset, onHold)
     return b
 end
 
-flyButton("▲", -40, function(v) Misc.UpHeld = v end)
-flyButton("▼", 40, function(v) Misc.DownHeld = v end)
+flyButton("UP", -40, function(v) Misc.UpHeld = v end)
+flyButton("DN", 40, function(v) Misc.DownHeld = v end)
 end)() end
 
 ---------------------------------------------------------------------
@@ -10171,7 +10171,7 @@ do (function()
             Position = UDim2.new(0.81, 0, 0.21, 0),
             Size = UDim2.new(0, 26, 0, 24),
             Font = Enum.Font.GothamBold,
-            Text = "×",
+            Text = "X",
             TextColor3 = DiscordColors.SubText,
             TextSize = 15,
             AutoButtonColor = false,
@@ -11221,17 +11221,28 @@ do (function()
                                     Text = "",
                                 }, DropItemHolder), 4)
 
+                                if picked then
+                                    create("ImageLabel", {
+                                        Name = "CheckIcon",
+                                        BackgroundTransparency = 1,
+                                        Position = UDim2.new(0, 7, 0.5, -7),
+                                        Size = UDim2.fromOffset(14, 14),
+                                        Image = "http://www.roblox.com/asset/?id=6023426926",
+                                        ImageColor3 = DiscordColors.Text,
+                                    }, Item)
+                                end
+
                                 local ItemText = create("TextLabel", {
                                     Name = "ItemText",
                                     BackgroundTransparency = 1,
-                                    Position = UDim2.fromOffset(8, 0),
-                                    Size = UDim2.new(1, -16, 1, 0),
+                                    Position = UDim2.fromOffset(picked and 26 or 8, 0),
+                                    Size = UDim2.new(1, picked and -34 or -16, 1, 0),
                                     Font = Enum.Font.Gotham,
                                     TextColor3 = picked and DiscordColors.Text or Color3.fromRGB(212, 212, 212),
                                     TextSize = 13,
                                     TextXAlignment = Enum.TextXAlignment.Left,
                                     TextTruncate = Enum.TextTruncate.AtEnd,
-                                    Text = (picked and "✓  " or "") .. itemStr,
+                                    Text = itemStr,
                                 }, Item)
 
                                 Item.MouseEnter:Connect(function()
@@ -11383,20 +11394,19 @@ do (function()
                         Text = "",
                     }, sectionFrame), 4)
 
-                    local arrowLabel = create("TextLabel", {
+                    local arrowIcon = create("ImageLabel", {
+                        Name = "ArrowIcon",
                         BackgroundTransparency = 1,
-                        Position = UDim2.fromOffset(8, 0),
-                        Size = UDim2.fromOffset(14, 28),
-                        Font = Enum.Font.GothamBold,
-                        Text = "▾",
-                        TextColor3 = DiscordColors.Muted,
-                        TextSize = 12,
+                        Position = UDim2.new(0, 6, 0.5, -8),
+                        Size = UDim2.fromOffset(16, 16),
+                        Image = "http://www.roblox.com/asset/?id=6034818372",
+                        ImageColor3 = DiscordColors.Muted,
                     }, headerBtn)
 
                     local headerTitle = create("TextLabel", {
                         BackgroundTransparency = 1,
-                        Position = UDim2.fromOffset(22, 0),
-                        Size = UDim2.new(1, -28, 1, 0),
+                        Position = UDim2.fromOffset(25, 0),
+                        Size = UDim2.new(1, -31, 1, 0),
                         Font = Enum.Font.GothamBold,
                         Text = string.upper(tostring(options.Title or "")),
                         TextColor3 = DiscordColors.Muted,
@@ -11419,9 +11429,9 @@ do (function()
                     }, body)
 
                     local function repaintHeader()
-                        arrowLabel.Text = body.Visible and "▾" or "▸"
+                        arrowIcon.Rotation = body.Visible and 0 or -90
                         headerTitle.TextColor3 = body.Visible and DiscordColors.Text or DiscordColors.Muted
-                        arrowLabel.TextColor3 = body.Visible and DiscordColors.Blurple or DiscordColors.Muted
+                        arrowIcon.ImageColor3 = body.Visible and DiscordColors.Blurple or DiscordColors.Muted
                         updateCanvas()
                     end
                     headerBtn.MouseEnter:Connect(function()
@@ -11958,7 +11968,7 @@ do (function()
     end
 
     UI.DiscordLib = DiscordLib
-    UI.Window = DiscordLib:Window("N4TH v2.0  •  Growtopia")
+    UI.Window = DiscordLib:Window("N4TH v2.0 - Growtopia")
 end)() end
 
 local Window = UI.Window
@@ -12433,7 +12443,7 @@ safe(function()
     Box.ClearSet:Dropdown({
         Title = "Sweep direction",
         Desc = "Zig-zag is faster (no going back left)",
-        Values = { "Left → Right", "Zig-zag" },
+        Values = { "Left -> Right", "Zig-zag" },
         Value = Clear.Sweep,
         Callback = function(opt) Clear.Sweep = opt end,
     })
@@ -14460,12 +14470,12 @@ do
                 local id, info = Build.dirtBlock(), Build.DirtInfo
                 local phase = Build.DirtRun and Build.Phase or Build.DirtPhase or "Ready to build"
                 local bottom = settings.Y1 >= 1 and tostring(settings.Y1) or "bedrock"
-                local text = ("%s\nX %d–%d | Y %d–%s | Dirt ×%d"):format(phase,
+                local text = ("%s\nX %d-%d | Y %d-%s | Dirt x%d"):format(phase,
                     settings.X0, settings.X1, settings.Y0, bottom, id and invCount(id) or 0)
                 if info then
                     text ..= ("\n%d/%d blocks | %d tiles"):format(info.done, info.total, info.carve + info.kept)
                     if info.placeTop then
-                        text ..= ("\n%s: Y %d–%d"):format("Place rows", info.placeTop, info.placeBottom)
+                        text ..= ("\n%s: Y %d-%d"):format("Place rows", info.placeTop, info.placeBottom)
                     end
                 end
                 if shown ~= text then
@@ -14950,7 +14960,7 @@ do (function()
     safe(function()
         pDrop:Toggle({
             Title = "Auto drop seeds",
-            Desc = "To the drop point (Auto Drop → Shared drop point)",
+            Desc = "To the drop point (Auto Drop -> Shared drop point)",
             Value = Factory.Drop,
             Callback = function(on) Factory.Drop = on end,
         })
@@ -16264,7 +16274,7 @@ do
     safe(function()
         UI.GhostToggle = character:Toggle({
             Title = "Fly + Noclip",
-            Desc = "Use ▲/▼ to fly. Move into open space before turning it off. Passing through blocks can trigger a kick.",
+            Desc = "Use UP/DN to fly. Move into open space before turning it off. Passing through blocks can trigger a kick.",
             Value = false,
             Callback = function(on) setGhost(on, true) end,
         })
@@ -16473,7 +16483,7 @@ task.spawn(function()
                 if activity[1] then running[#running + 1] = activity[2] end
             end
             local status = world ~= "" and world or "Outside a world"
-            status ..= "\n" .. (#running > 0 and ("Active" .. "  " .. table.concat(running, " · "))
+            status ..= "\n" .. (#running > 0 and ("Active" .. "  " .. table.concat(running, " | "))
                 or "No activities running")
             if status ~= UI.HomeShown then
                 UI.HomeShown = status
