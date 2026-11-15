@@ -9,7 +9,7 @@ for _, key in ipairs({ "__n4thOpus", "__GTFarm" }) do -- __GTFarm = legacy versi
     G[key] = nil
 end
 local Session = {}
-Session.Build = "2026-11-15-pathfind-tp-2"
+Session.Build = "2026-11-15-dirt-lava-place-fix"
 G.__n4thOpus = Session
 local function alive()
     return G.__n4thOpus == Session
@@ -860,7 +860,7 @@ local State = {
 local Misc = {
     Speed = 100,       -- walkspeed % (100 = normal)
     InfJump = false,
-    PathGlide = false, -- click/tap 1-click A* Pathfind TP
+    PathGlide = true, -- click/tap 1-click A* Pathfind TP
     TpDelay = 70,      -- delay (ms) between A* tile steps (~67 ms = 1 tile per native 15 Hz sync)
     CustomName = true,          -- name watermark (always on, removed only when script closes)
     NameText = "https://dsc.gg/nath",  -- watermark text
@@ -8596,10 +8596,17 @@ function Build.dirtBlock()
 end
 
 function Build.canDigTerrain(id)
+    if not id or id == 0 or not canBreak(id) then return false end
     local item = ItemDB[id]
-    if not item or type(item.name) ~= "string" or not clearCanBreak(id) then return false end
+    if not item or type(item.name) ~= "string" or item.guildLock or item.kind == "seed" then return false end
+    local h = item.hits
+    if type(h) == "number" and h <= 0 then
+        local w = Refs.World
+        if not (item.staffHits and w and w.areas and w.areas.staff) then return false end
+    end
+    if item.deadly or item.hurts or item.laser then return true end
     local name = item.name:lower()
-    return name == "dirt" or name == "rock" or name == "lava"
+    return name == "dirt" or name == "rock" or name == "lava" or name:find("lava", 1, true) ~= nil
 end
 
 function Build.dirtWorldMatches(run)
@@ -8613,7 +8620,10 @@ function Build.allowDirtHit(x, y, id, layer)
         or tileAt(layer, x, y) ~= id or not canWorkAt(x, y) then return false end
     local s = playerState()
     if not s or not s.grounded or not stateReaches(s, x, y, punchReach() - 0.08) then return false end
-    if layer == "bg" then return fgIdAt(x, y) == 0 and clearCanBreak(id) end
+    if layer == "bg" then
+        local it = ItemDB[id]
+        return fgIdAt(x, y) == 0 and it ~= nil and not it.guildLock and canBreak(id)
+    end
     return Build.canDigTerrain(id)
 end
 
@@ -8811,10 +8821,11 @@ function Build.carveList(P, live)
         local id = fgIdAt(x, y)
         local need = false
         if id == 0 then
-            need = canFill
+            need = canFill and not P.dirt
         elseif not Build.done(x, y) then
             local it = ItemDB[id]
-            need = (not P.dirt or Build.canDigTerrain(id)) and it ~= nil and it.kind ~= "seed" and (it.deadly or it.hurts) and canBreak(id) and true or false
+            local hazardous = it ~= nil and it.kind ~= "seed" and (it.deadly or it.hurts or it.laser)
+            need = hazardous and (not P.dirt or Build.canDigTerrain(id)) and canBreak(id) and true or false
         end
         if need then list[#list + 1] = { x = x, y = y, idx = y * W + x, kind = "fill" } end
     end
@@ -8835,8 +8846,8 @@ function Build.carveList(P, live)
                 Session.scanStep(budget, visited)
                 if live and not live() then return list, kept end
             end
-            if not P.dirt and L[x] then fill(x, y) end -- patch floor while digging in Build Land
             add(x, y - 1, "gap")
+            if L[x] then fill(x, y) end -- patch/break lava & floor hazards while digging
             if x == up then add(x, P.rows[k - 1], "hole") end
         end
         -- exit shaft for this row = drop down to gap row below
@@ -8869,7 +8880,7 @@ function Build.goNear(targets, R, maxY, noSelf, live)
     end
     local fails = BuildFail[f.idx] or 0
     if #path == 0 then
-        execWalk(sx, sy) -- already on spot but out of reach: center on tile
+        execWalk(sx, sy, 0.05) -- already on spot but out of reach: center on tile
         fails += 1
     elseif not followPath(path) then
         fails += 1
@@ -8956,7 +8967,12 @@ function Build.fillTile(t, live, dirt)
         if not stateReaches(cur, t.x, t.y, Build.placeReach()) or overlapsPlayer(t.x, t.y, cur) then
             return "move"
         end
-        if invCount(Build.activeBlock()) <= 0 or not placeBuild(t, cur) then
+        if invCount(Build.activeBlock()) <= (Build.Reserve or 0) then
+            if dirt then return "done" end
+            skipTile(Build.Skip, t.idx, 30)
+            return "skip"
+        end
+        if not placeBuild(t, cur) then
             skipTile(Build.Skip, t.idx, 30)
             return "skip"
         end
@@ -8998,7 +9014,8 @@ function Build.carveStep(P, list, live)
     if P.dirt and first.kind == "gap" then
         work = {}
         for _, t in ipairs(list) do
-            if t.kind == "gap" and t.y == first.y and not skipped(Build.Skip, t.idx, now) then
+            if ((t.kind == "gap" and t.y == first.y) or (t.kind == "fill" and t.y == first.y + 1))
+                and not skipped(Build.Skip, t.idx, now) then
                 work[#work + 1] = t
             end
         end
@@ -9037,7 +9054,7 @@ function Build.carveStep(P, list, live)
     if did > 0 then return "work" end
     local F = work[fi]
     local filling = F.kind == "fill"
-    local R = (filling and fgIdAt(F.x, F.y) == 0) and placeR or hitR
+    local R = (filling and fgIdAt(F.x, F.y) == 0) and (placeR - 0.27) or hitR
     local r = Build.goNear(work ~= list and work or { F }, R, nil, filling, live)
     if r == "nopath" then
         -- no path here yet: skip the rest of row briefly (avoid pathfinding every tile)
@@ -9095,13 +9112,15 @@ function Build.placeStep(P, live)
     for kk = P.placeK or P.K, 1, -1 do
         local y = P.rows[kk]
         local list = {}
-        local incomplete = false
+        local pendingSkip = false
         for _, x in ipairs(P.cols[kk]) do
             local idx = y * W + x
             if not Build.done(x, y) then
-                incomplete = true
-                if not skipped(Build.Skip, idx, now) then
+                local untilAt = Build.Skip[idx]
+                if not untilAt or untilAt <= now then
                     list[#list + 1] = { x = x, y = y, idx = idx }
+                elseif untilAt - now <= 45 then
+                    pendingSkip = true
                 end
             end
         end
@@ -9109,7 +9128,7 @@ function Build.placeStep(P, live)
             k, T = kk, list
             break
         end
-        if P.dirt and incomplete then return "none" end
+        if P.dirt and pendingSkip then return "none" end
     end
     if not k then return "none" end
     local y = P.rows[k]
@@ -9180,7 +9199,7 @@ function Build.placeStep(P, live)
     if done > 0 then return "work" end
     if invCount(id) <= (Build.Reserve or 0) then return "none" end
 
-    local RR = P.dirt and placeR or placeR - 0.27
+    local RR = placeR - 0.27
     -- climb onto this row and place forward (row acts as bridge)
     if not P.dirt and hasAny and not under then
         local r = Build.goNear(T, RR, y - 1, true, live)
@@ -9201,6 +9220,9 @@ function Build.placeStep(P, live)
         Build.Under[k] = now + 60
     end
     local r = Build.goNear(T, RR, nil, true, live)
+    if r == "nopath" and P.dirt and hasAny then
+        r = Build.goNear(T, RR, y - 1, true, live)
+    end
     if r == "nopath" then
         for _, t in ipairs(T) do skipTile(Build.Skip, t.idx, 30) end
         Build.Status = ("Row y %d unreachable, skipping briefly"):format(y)
@@ -9567,12 +9589,30 @@ local function buildLoop(runId, dirt)
             if not live() then break end
             if r ~= "none" then noneAt = nil end
         end
-        if r == "none" and (#carve == 0 or dirt) and not o.dugSwept then
-            -- dig done: collect all dug drops first, row by row
-            o.dugSwept, o.sweptAt = true, os.clock()
-            Build.Phase = "Collecting leftover dug drops (row by row)"
-            Build.sweep(P, live, nil, 600)
-            continue
+        if r == "none" and not o.dugSwept then
+            if dirt and #carve > 0 then
+                noneAt = noneAt or os.clock()
+                local waited = os.clock() - noneAt
+                if not o.carveReset then
+                    if waited < 3 then
+                        if not waitAuto(1000) then break end
+                        continue
+                    end
+                    o.carveReset = true
+                    table.clear(Build.Skip)
+                    table.clear(BuildFail)
+                    table.clear(BadEdge)
+                    Reach = nil
+                    continue
+                end
+            end
+            if #carve == 0 or dirt then
+                -- dig done: collect all dug drops first, row by row
+                o.dugSwept, o.sweptAt = true, os.clock()
+                Build.Phase = "Collecting leftover dug drops (row by row)"
+                Build.sweep(P, live, nil, 600)
+                continue
+            end
         end
         if r == "none" then
             local have = invCount(block)
@@ -9644,7 +9684,10 @@ local function buildLoop(runId, dirt)
                 end
                 local pr = Build.placeStep(P, live)
                 if not live() then break end
-                if dirt and os.clock() - o.placeProgressAt > 60 then
+                if dirt and pr == "work" then
+                    o.placeProgressAt = os.clock()
+                end
+                if dirt and os.clock() - (o.placeProgressAt or os.clock()) > 90 then
                     Build.stop(("Dirt Farm stopped: %d floor tiles unreachable or blocked"):format(info.need))
                     break
                 end
